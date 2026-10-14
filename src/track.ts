@@ -1,0 +1,568 @@
+import * as THREE from 'three';
+
+export interface TrackSample {
+  p: THREE.Vector3;
+  tangent: THREE.Vector3; // unit, xz plane
+}
+
+export interface TrackQuery {
+  index: number;
+  height: number;
+  lateral: number; // signed distance from centerline (sign only matters for side, abs() for off-track)
+  gap: boolean; // true over the pit: no road here, the ground is `pitFloor`
+  slope: number; // road gradient (rise per metre) along the direction of increasing sample index
+}
+
+/**
+ * Figure 8: a Gerono lemniscate, x = a sin t, z = b sin t cos t. With a = b the two strands cross at
+ * right angles, and both run nearly straight through the crossing (it is an inflection point), which is
+ * where the jump goes. The lap starts a little before the crossing, on the straight leading into the jump.
+ */
+const EIGHT = { a: 105, b: 105, start: -0.5, points: 32 };
+const CONTROL_POINTS: [number, number, number][] = Array.from({ length: EIGHT.points }, (_, k) => {
+  const t = EIGHT.start + (2 * Math.PI * k) / EIGHT.points;
+  return [EIGHT.a * Math.sin(t), 0, EIGHT.b * Math.sin(t) * Math.cos(t)];
+});
+
+const ASPHALT_TILE = 6; // metres of road covered by one texture tile
+
+/** Small tileable tarmac texture: fine grit plus a few coarse stones. Null where there is no DOM (tests). */
+function makeAsphaltTexture(): THREE.CanvasTexture | null {
+  if (typeof document === 'undefined') return null;
+  const size = 256;
+  const canvas = document.createElement('canvas');
+  canvas.width = canvas.height = size;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return null;
+
+  const img = ctx.createImageData(size, size);
+  for (let i = 0; i < size * size; i++) {
+    const g = 90 + (Math.random() - 0.5) * 26; // per-pixel grit around a mid dark grey
+    img.data[i * 4] = g;
+    img.data[i * 4 + 1] = g + 1;
+    img.data[i * 4 + 2] = g + 6;
+    img.data[i * 4 + 3] = 255;
+  }
+  ctx.putImageData(img, 0, 0);
+  for (let i = 0; i < 900; i++) {
+    const light = Math.random() < 0.5;
+    ctx.fillStyle = light ? 'rgba(150,152,160,0.35)' : 'rgba(30,31,36,0.45)';
+    const w = 1 + Math.random() * 2;
+    // draw twice (wrapped) so stones crossing an edge still tile seamlessly
+    const x = Math.random() * size;
+    const y = Math.random() * size;
+    for (const [dx, dy] of [[0, 0], [-size, 0], [0, -size], [-size, -size]]) ctx.fillRect(x + dx, y + dy, w, w);
+  }
+
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.anisotropy = 8;
+  return tex;
+}
+
+/**
+ * Rolling hills and valleys: a few low harmonics of the lap (so the road closes up seamlessly). Slopes stay
+ * under ~10% and the crests are far too gentle to launch a car at top speed. The terrain is flattened around
+ * the jump so its geometry (and the speed needed to clear it) does not depend on the hills. Shifted so the
+ * road never dips below the ground plane.
+ */
+const ROLLING = [
+  { cycles: 2, amplitude: 1.3, phase: 0.6 },
+  { cycles: 3, amplitude: 0.9, phase: 2.1 },
+  { cycles: 4, amplitude: 0.6, phase: 3.3 },
+  { cycles: 6, amplitude: 0.35, phase: 1.3 },
+];
+const FLAT_BEFORE_JUMP = 24; // samples of flat terrain before the lip (the up ramp is ~20 m long)
+const FLAT_AFTER_JUMP = 24; // ... and after the landing lip (the mirrored down ramp is the same length)
+const FLAT_BLEND = 35; // samples over which the hills fade back in
+// The other strand passes under the jump at ground level: its road is flat at height 0 around the crossing,
+// and its barriers are left out where the jump's ramps stand over them.
+const CROSSING_FLAT = 30; // samples
+const CROSSING_BLEND = 40;
+const CROSSING_NO_WALLS = 30;
+
+/**
+ * The jump: a ramp up to a sharp lip, a pit as long as the road is wide (no road in it), then the same
+ * ramp mirrored back down. Both ramps share one profile, so they have identical height and length. A car
+ * leaves the lip with vertical speed = speed * (slope at the lip), so `lipSlope` is what makes a car at top
+ * speed (30 m/s, gravity 78) clear the pit and land well beyond it. The profile is a curve (flat at the
+ * foot, steepening to the lip) so a long ramp is not absurdly tall: the slope falls off as
+ * (1 - u/length)^p with u the distance from the lip, and p follows from the height.
+ */
+const JUMP = { x: 0, z: 0, height: 8, length: 20, lipSlope: 1.35 };
+
+export class Track {
+  readonly halfWidth = 9;
+  readonly wallOffset = 12; // centerline distance of the barriers
+  readonly wallHeight = 1.4;
+  readonly wallThickness = 1.4; // extends outward from the collision face
+  readonly checkpointCount = 8; // checkpoint 0 is the start/finish line
+  readonly samples: TrackSample[] = [];
+  readonly mesh: THREE.Mesh;
+  readonly walls: THREE.Mesh;
+  readonly centreLine: THREE.Mesh;
+  readonly kerbs: THREE.Mesh;
+  readonly terrain: THREE.Mesh;
+  readonly finishLine: THREE.Mesh;
+  readonly pit: THREE.Mesh;
+  readonly spacing: number; // average distance between samples along the ground (m)
+  readonly pitFloor = -0.05;
+  readonly gapFrom: number; // last road sample before the pit (the lip)
+  readonly gapTo: number; // first road sample after the pit (top of the landing ramp)
+  readonly respawnIndex: number; // where cars restart after falling into the pit
+  readonly crossingIndex: number; // where the other strand passes under the jump (at ground level)
+  private readonly searchWindow = 40;
+
+  constructor(readonly sampleCount = 600) {
+    const curve = new THREE.CatmullRomCurve3(
+      CONTROL_POINTS.map(([x, y, z]) => new THREE.Vector3(x, y, z)),
+      true,
+      'centripetal',
+    );
+    for (let i = 0; i < sampleCount; i++) {
+      const t = i / sampleCount;
+      const p = curve.getPointAt(t);
+      const tangent = curve.getTangentAt(t);
+      tangent.y = 0;
+      tangent.normalize();
+      this.samples.push({ p, tangent });
+    }
+    let length = 0;
+    for (let i = 0; i < sampleCount; i++) {
+      const a = this.samples[i].p;
+      const b = this.samples[(i + 1) % sampleCount].p;
+      length += Math.hypot(b.x - a.x, b.z - a.z);
+    }
+    this.spacing = length / sampleCount;
+
+    const gap = this.jumpLayout();
+    this.crossingIndex = this.findCrossing();
+    this.addRolling(gap.from, gap.to);
+    this.addJump(gap);
+    this.gapFrom = gap.from;
+    this.gapTo = gap.to;
+    this.respawnIndex = (gap.from - 65 + sampleCount) % sampleCount;
+
+    this.mesh = this.buildMesh();
+    this.walls = this.buildWalls();
+    this.centreLine = this.buildCentreLine();
+    this.kerbs = this.buildKerbs();
+    this.terrain = this.buildTerrain();
+    this.pit = this.buildPit();
+    this.finishLine = this.buildFinishLine();
+  }
+
+  private addRolling(from: number, to: number): void {
+    const n = this.sampleCount;
+    const smooth = (t: number) => { const c = Math.min(1, Math.max(0, t)); return c * c * (3 - 2 * c); };
+    const heights = this.samples.map((_, i) => {
+      const raw = ROLLING.reduce((sum, w) => sum + w.amplitude * Math.sin((2 * Math.PI * w.cycles * i) / n + w.phase), 0);
+      // Distance in samples from the flat zone around the jump, 0 inside it.
+      const outside = Math.max(from - FLAT_BEFORE_JUMP - i, i - (to + FLAT_AFTER_JUMP), 0);
+      return raw * smooth(outside / FLAT_BLEND);
+    });
+    const lowest = Math.min(...heights);
+    this.samples.forEach((s, i) => {
+      // Ground level (exactly 0) under the jump, easing back into the hills on either side.
+      const away = Math.max(Math.abs(i - this.crossingIndex) - CROSSING_FLAT, 0);
+      s.p.y += (heights[i] - lowest) * smooth(away / CROSSING_BLEND);
+    });
+  }
+
+  /** The sample where the strand that runs under the jump is closest to the jump's position. */
+  private findCrossing(): number {
+    const n = this.sampleCount;
+    let best = n - 1;
+    let bestD = Infinity;
+    for (let i = Math.floor(n / 2); i < n; i++) {
+      const d = (this.samples[i].p.x - JUMP.x) ** 2 + (this.samples[i].p.z - JUMP.z) ** 2;
+      if (d < bestD) { bestD = d; best = i; }
+    }
+    return best;
+  }
+
+  /** Which samples are the lip and the landing of the jump (the pit lies between them). */
+  private jumpLayout(): { from: number; to: number } {
+    const n = this.sampleCount;
+    let centre = 0;
+    let best = Infinity;
+    for (let i = 0; i < Math.floor(n / 2); i++) { // the jump is on the first strand; the second runs beneath it
+      const d = (this.samples[i].p.x - JUMP.x) ** 2 + (this.samples[i].p.z - JUMP.z) ** 2;
+      if (d < best) { best = d; centre = i; }
+    }
+    // The road it crosses over, plus a metre each side, in an even number of samples so the pit is centred on the crossing.
+    const span = 2 * Math.ceil((2 * this.halfWidth + 2) / this.spacing / 2);
+    const from = centre - Math.floor(span / 2);
+    return { from, to: from + span };
+  }
+
+  /** Builds the ramp-pit-ramp profile on top of the rolling terrain. */
+  private addJump({ from, to }: { from: number; to: number }): void {
+    const span = to - from;
+    const height = JUMP.height;
+    const p = (JUMP.lipSlope * JUMP.length) / height - 1; // curve exponent; needs lipSlope * length >= height
+    /** How far the ramp surface lies below the lip at distance u from it (same on both sides of the pit). */
+    const drop = (u: number) =>
+      ((JUMP.lipSlope * JUMP.length) / (p + 1)) * (1 - Math.pow(1 - Math.min(u, JUMP.length) / JUMP.length, p + 1));
+
+    for (let k = 0; k * this.spacing <= JUMP.length; k++) {
+      this.samples[from - k].p.y += height - drop(k * this.spacing); // on-ramp
+      this.samples[to + k].p.y += height - drop(k * this.spacing); // off-ramp: the mirror image
+    }
+    // The pit samples carry a flat surface between the two lips; it is only used for the barriers.
+    const y0 = this.samples[from].p.y;
+    const y1 = this.samples[to].p.y;
+    for (let i = from + 1; i < to; i++) this.samples[i].p.y += y0 + ((y1 - y0) * (i - from)) / span;
+  }
+
+  /** The quad between samples k and k+1 lies over the pit. */
+  private isGapQuad(k: number): boolean {
+    return k >= this.gapFrom && k < this.gapTo;
+  }
+
+  /** Road surface: tarmac texture tiled along the track, no stripes. */
+  private buildMesh(): THREE.Mesh {
+    const n = this.sampleCount;
+    const pos: number[] = [];
+    const uv: number[] = [];
+    const idx: number[] = [];
+    const across = (2 * this.halfWidth) / ASPHALT_TILE;
+    let dist = 0;
+    // One extra pair of vertices closes the loop, so the texture coordinate keeps running.
+    for (let i = 0; i <= n; i++) {
+      const { p, tangent } = this.samples[i % n];
+      if (i > 0) dist += p.distanceTo(this.samples[i - 1].p);
+      const left = new THREE.Vector3(-tangent.z, 0, tangent.x); // perpendicular to tangent in xz
+      const a = p.clone().addScaledVector(left, this.halfWidth);
+      const b = p.clone().addScaledVector(left, -this.halfWidth);
+      pos.push(a.x, a.y + 0.02, a.z, b.x, b.y + 0.02, b.z);
+      const v = dist / ASPHALT_TILE;
+      uv.push(0, v, across, v);
+      if (i < n && !this.isGapQuad(i)) idx.push(i * 2, i * 2 + 1, (i + 1) * 2, (i + 1) * 2, i * 2 + 1, (i + 1) * 2 + 1);
+    }
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+    g.setIndex(idx);
+    g.computeVertexNormals();
+    const map = makeAsphaltTexture();
+    const material = map
+      ? new THREE.MeshLambertMaterial({ map, side: THREE.DoubleSide })
+      : new THREE.MeshLambertMaterial({ color: 0x4a4c55, side: THREE.DoubleSide });
+    return new THREE.Mesh(g, material);
+  }
+
+  /**
+   * Red/white striped kerbs on the inside edge of the sharper bends, just outside the edge line.
+   * Visual only; they sit at road level on the shoulder.
+   */
+  private buildKerbs(): THREE.Mesh {
+    const n = this.sampleCount;
+    const TURN_RATE = 0.022; // rad/m; tighter than this (radius under ~45 m) gets kerbs
+    const smoothHalf = 5;
+    const stripe = Math.max(1, Math.round(3 / this.spacing));
+    const width = 1.4;
+    const inner = this.halfWidth - 0.3; // tuck under the edge line so there is no gap
+    // Signed turn rate per sample: positive = bending toward the left vector.
+    const raw: number[] = [];
+    for (let i = 0; i < n; i++) {
+      const t = this.samples[i].tangent;
+      const u = this.samples[(i + 1) % n].tangent;
+      raw.push((t.x * u.z - t.z * u.x) / this.spacing); // cross(t, u) ~ sin(turn angle)
+    }
+    const rate = raw.map((_, i) => {
+      let sum = 0;
+      for (let d = -smoothHalf; d <= smoothHalf; d++) sum += raw[(i + d + n) % n];
+      return sum / (2 * smoothHalf + 1);
+    });
+    const pos: number[] = [];
+    const col: number[] = [];
+    const idx: number[] = [];
+    const red = [0.82, 0.1, 0.1];
+    const white = [0.95, 0.95, 0.95];
+    for (let k = 0; k < n; k++) {
+      if (k >= this.gapFrom && k < this.gapTo) continue;
+      const r = rate[k];
+      if (Math.abs(r) < TURN_RATE) continue;
+      // The inside of the bend is the side the tangent turns toward.
+      const a = this.samples[k];
+      const b = this.samples[(k + 1) % n];
+      const left = { x: -a.tangent.z, z: a.tangent.x };
+      const side = (b.tangent.x - a.tangent.x) * left.x + (b.tangent.z - a.tangent.z) * left.z >= 0 ? 1 : -1;
+      const color = Math.floor(k / stripe) % 2 === 0 ? red : white;
+      const base = pos.length / 3;
+      for (const s of [a, b]) {
+        const lx = -s.tangent.z;
+        const lz = s.tangent.x;
+        for (const off of [inner, inner + width]) {
+          pos.push(s.p.x + lx * side * off, s.p.y + 0.05, s.p.z + lz * side * off);
+          col.push(...color);
+        }
+      }
+      idx.push(base, base + 1, base + 2, base + 2, base + 1, base + 3);
+    }
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    g.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+    g.setIndex(idx);
+    g.computeVertexNormals();
+    const material = new THREE.MeshLambertMaterial({
+      vertexColors: true,
+      side: THREE.DoubleSide,
+      polygonOffset: true,
+      polygonOffsetFactor: -1,
+      polygonOffsetUnits: -1,
+    });
+    return new THREE.Mesh(g, material);
+  }
+
+  /** Solid white edge lines along both sides of the road, following the elevation (named centreLine for legacy reasons). */
+  private buildCentreLine(): THREE.Mesh {
+    const n = this.sampleCount;
+    const lineHalf = 0.15;
+    const inset = 0.5; // centre of each line, from the road edge
+    const pos: number[] = [];
+    const idx: number[] = [];
+    for (const side of [1, -1]) {
+      const offset = side * (this.halfWidth - inset);
+      let base = -1; // vertex index of the previous sample in the current run, -1 when a run is not open
+      for (let k = 0; k <= n; k++) {
+        const over = k > this.gapFrom && k < this.gapTo; // no road over the pit
+        if (over) {
+          base = -1;
+          continue;
+        }
+        const { p, tangent } = this.samples[k % n];
+        const lx = -tangent.z;
+        const lz = tangent.x;
+        const c = pos.length / 3;
+        pos.push(
+          p.x + lx * (offset + lineHalf), p.y + 0.04, p.z + lz * (offset + lineHalf),
+          p.x + lx * (offset - lineHalf), p.y + 0.04, p.z + lz * (offset - lineHalf),
+        );
+        if (base >= 0) idx.push(base, base + 1, c, c, base + 1, c + 1);
+        base = c;
+      }
+    }
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    g.setIndex(idx);
+    g.computeVertexNormals();
+    const material = new THREE.MeshLambertMaterial({
+      color: 0xf4f4f4,
+      side: THREE.DoubleSide,
+      polygonOffset: true,
+      polygonOffsetFactor: -2,
+      polygonOffsetUnits: -2,
+    });
+    return new THREE.Mesh(g, material);
+  }
+
+  /** Chequered start/finish line across the road at sample 0, where laps are counted. */
+  private buildFinishLine(): THREE.Mesh {
+    const n = this.sampleCount;
+    const cols = Math.round(2 * this.halfWidth); // roughly 1 m squares, as deep as the sample spacing
+    const rows = 4;
+    const first = -Math.floor(rows / 2);
+    const white = new THREE.Color(0xf4f4f4);
+    const black = new THREE.Color(0x141414);
+    const pos: number[] = [];
+    const col: number[] = [];
+    const idx: number[] = [];
+    const point = (sample: number, c: number) => {
+      const { p, tangent } = this.samples[((sample % n) + n) % n];
+      const lateral = -this.halfWidth + (c / cols) * 2 * this.halfWidth;
+      return [p.x - tangent.z * lateral, p.y + 0.05, p.z + tangent.x * lateral];
+    };
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        const base = pos.length / 3;
+        pos.push(...point(first + r, c), ...point(first + r, c + 1), ...point(first + r + 1, c), ...point(first + r + 1, c + 1));
+        const color = (r + c) % 2 === 0 ? white : black;
+        for (let k = 0; k < 4; k++) col.push(color.r, color.g, color.b);
+        idx.push(base, base + 1, base + 2, base + 2, base + 1, base + 3);
+      }
+    }
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    g.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+    g.setIndex(idx);
+    g.computeVertexNormals();
+    return new THREE.Mesh(
+      g,
+      new THREE.MeshLambertMaterial({
+        vertexColors: true,
+        side: THREE.DoubleSide,
+        polygonOffset: true,
+        polygonOffsetFactor: -3,
+        polygonOffsetUnits: -3,
+      }),
+    );
+  }
+
+  /**
+   * Solid ground around the road so raised sections read as ramps: a shoulder at road height out to
+   * the barriers, then a 45 degree embankment dropping to the ground. Both vanish where the road is flat.
+   */
+  private buildTerrain(): THREE.Mesh {
+    const n = this.sampleCount;
+    const pos: number[] = [];
+    const col: number[] = [];
+    const idx: number[] = [];
+    // Multiplied with the grass texture, so grass is plain white and dirt is a warm tint.
+    const grass = new THREE.Color(0xffffff);
+    const dirt = new THREE.Color(0xd6b48a);
+    const groundY = -0.05;
+    const outer = this.wallOffset + this.wallThickness;
+
+    const addStrip = (side: number, rail: (i: number) => [number, number, THREE.Color][]) => {
+      const base = pos.length / 3;
+      for (let i = 0; i < n; i++) {
+        const { p, tangent } = this.samples[i];
+        for (const [d, y, c] of rail(i)) {
+          pos.push(p.x - tangent.z * d * side, y, p.z + tangent.x * d * side);
+          col.push(c.r, c.g, c.b);
+        }
+      }
+      for (let i = 0; i < n; i++) {
+        if (this.isGapQuad(i)) continue;
+        const a = base + i * 2;
+        const b = base + ((i + 1) % n) * 2;
+        idx.push(a, a + 1, b, b, a + 1, b + 1);
+      }
+    };
+
+    for (const side of [1, -1]) {
+      const h = (i: number) => this.samples[i].p.y;
+      addStrip(side, (i) => [[this.halfWidth, h(i), grass], [outer, h(i), grass]]); // shoulder
+      addStrip(side, (i) => [[outer, h(i), dirt], [outer + Math.max(h(i), 0), groundY, grass]]); // embankment
+    }
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    g.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+    g.setIndex(idx);
+    g.computeVertexNormals();
+    return new THREE.Mesh(g, new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.DoubleSide }));
+  }
+
+  /**
+   * Barriers with real thickness: an inner face, a top and an outer face per side. The top is the
+   * face a top-down camera sees, so it gets its own light colour. Collision uses the inner face.
+   */
+  private buildWalls(): THREE.Mesh {
+    const n = this.sampleCount;
+    const pos: number[] = [];
+    const col: number[] = [];
+    const idx: number[] = [];
+    const sideColor = new THREE.Color(0xa9adb5);
+    const topColor = new THREE.Color(0xf2f2f2);
+
+    // A strip of quads running along the track between two rails of (lateral offset, height) pairs.
+    // A height of 'base' means the bottom of the wall, which rests on the road's edge.
+    const addStrip = (side: number, d0: number, h0: number | 'base', d1: number, h1: number | 'base', color: THREE.Color) => {
+      const base = pos.length / 3;
+      for (let i = 0; i < n; i++) {
+        const { p, tangent } = this.samples[i];
+        const bottom = 0;
+        for (const [d, h] of [[d0, h0], [d1, h1]] as [number, number | 'base'][]) {
+          pos.push(p.x - tangent.z * d * side, p.y + (h === 'base' ? bottom : h), p.z + tangent.x * d * side);
+          col.push(color.r, color.g, color.b);
+        }
+      }
+      for (let i = 0; i < n; i++) {
+        if (this.isGapQuad(i) || Math.abs(i - this.crossingIndex) <= CROSSING_NO_WALLS) continue;
+        const a = base + i * 2;
+        const b = base + ((i + 1) % n) * 2;
+        idx.push(a, a + 1, b, b, a + 1, b + 1);
+      }
+    };
+
+    const inner = this.wallOffset;
+    const outer = this.wallOffset + this.wallThickness;
+    for (const side of [1, -1]) {
+      addStrip(side, inner, 'base', inner, this.wallHeight, sideColor); // road-facing face
+      addStrip(side, inner, this.wallHeight, outer, this.wallHeight, topColor); // top
+      addStrip(side, outer, this.wallHeight, outer, 'base', sideColor); // outer face
+    }
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    g.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+    g.setIndex(idx);
+    g.computeVertexNormals();
+    return new THREE.Mesh(g, new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.DoubleSide }));
+  }
+
+  /** The two sheer faces of the ramps either side of the gap. The ground beneath is the other road and grass. */
+  private buildPit(): THREE.Mesh {
+    const outer = this.wallOffset + this.wallThickness;
+    const floor = this.pitFloor + 0.01;
+    const face = new THREE.Color(0x7d6a4c);
+    const pos: number[] = [];
+    const col: number[] = [];
+    const idx: number[] = [];
+    const quad = (pts: number[][], color: THREE.Color) => {
+      const base = pos.length / 3;
+      for (const q of pts) {
+        pos.push(...q);
+        col.push(color.r, color.g, color.b);
+      }
+      idx.push(base, base + 1, base + 2, base, base + 2, base + 3);
+    };
+    const at = (sample: number, lateral: number, y: number) => {
+      const { p, tangent } = this.samples[sample];
+      return [p.x - tangent.z * lateral, y, p.z + tangent.x * lateral];
+    };
+    for (const sample of [this.gapFrom, this.gapTo]) {
+      const top = this.samples[sample].p.y;
+      quad([at(sample, -outer, floor), at(sample, outer, floor), at(sample, outer, top), at(sample, -outer, top)], face);
+    }
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    g.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+    g.setIndex(idx);
+    g.computeVertexNormals();
+    return new THREE.Mesh(g, new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.DoubleSide }));
+  }
+
+  /** True while a sample index lies in the first half-segment after checkpoint `cp`. */
+  inCheckpoint(index: number, cp: number): boolean {
+    const spacing = this.sampleCount / this.checkpointCount;
+    const delta = (index - cp * spacing + this.sampleCount) % this.sampleCount;
+    return delta < spacing / 2;
+  }
+
+  /** Unit vector pointing to the +lateral side of the track at a sample. */
+  sideVector(index: number): THREE.Vector2 {
+    const t = this.samples[index].tangent;
+    return new THREE.Vector2(-t.z, t.x);
+  }
+
+  /** Nearest centerline sample. Pass lastIndex to search a local window (prevents shortcut jumps). */
+  query(x: number, z: number, lastIndex?: number): TrackQuery {
+    const n = this.sampleCount;
+    let best = 0;
+    let bestD = Infinity;
+    const test = (i: number) => {
+      const s = this.samples[i].p;
+      const d = (s.x - x) ** 2 + (s.z - z) ** 2;
+      if (d < bestD) { bestD = d; best = i; }
+    };
+    if (lastIndex === undefined) {
+      for (let i = 0; i < n; i++) test(i);
+    } else {
+      for (let o = -this.searchWindow; o <= this.searchWindow; o++) test((lastIndex + o + n) % n);
+    }
+    const { p, tangent } = this.samples[best];
+    const lateral = (x - p.x) * -tangent.z + (z - p.z) * tangent.x;
+    // Interpolate the height toward the neighbouring sample on the car's side. Stepping between samples
+    // would give the ground an artificial vertical speed and launch cars over every slope.
+    const along = (x - p.x) * tangent.x + (z - p.z) * tangent.z;
+    const forward = along >= 0;
+    const next = this.samples[forward ? (best + 1) % n : (best - 1 + n) % n].p;
+    const height = p.y + (next.y - p.y) * Math.min(1, Math.abs(along) / this.spacing);
+    const slope = ((next.y - p.y) / this.spacing) * (forward ? 1 : -1);
+    const position = best + along / this.spacing; // continuous sample index
+    return { index: best, height, lateral, gap: position > this.gapFrom && position < this.gapTo, slope };
+  }
+}
