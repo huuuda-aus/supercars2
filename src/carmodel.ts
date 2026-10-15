@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { WHEEL_R, WHEEL_X, WHEEL_Z } from './spec';
 
-export type CarStyle = 'coupe' | 'sedan' | 'hatch';
+export type CarStyle = 'coupe' | 'sedan' | 'hatch' | 'beetle' | 'jeep';
 
 export interface CarModel {
   group: THREE.Group;
@@ -17,14 +17,48 @@ const BELT = 0.94; // beltline height: where the painted body ends and the glass
 const BODY_WIDTH = 1.9;
 const CABIN_WIDTH = 1.56;
 
-/** Greenhouse outline in (z, y), front-base, rear-base, rear-top, front-top, plus per-style extras. */
-const STYLES: Record<CarStyle, { cabin: [number, number][]; spoiler: boolean; lowNose: number }> = {
+interface StyleSpec {
+  /** Greenhouse outline in (z, y): front-base, rear-base, rear-top, front-top (more points for a rounded roof). */
+  cabin: [number, number][];
+  spoiler: boolean;
+  lowNose: number;
+  /** Upper silhouette of the lower body from the front bumper to the tail, (z, y); the default is a plain saloon line. */
+  top?: [number, number][];
+  /** Cabin is painted body colour with separate windows, not one glass block (a rounded roof). */
+  paintedCabin?: boolean;
+  roundLights?: boolean;
+  /** Bulging separate wheel arches over the wheels (an old-fashioned fender line). */
+  fenders?: boolean;
+  /** Boxy off-roader parts: black bumpers and flares, slatted grille, spare wheel on the tail. */
+  offroad?: boolean;
+}
+
+const STYLES: Record<CarStyle, StyleSpec> = {
   // Low fastback with a big rear wing.
   coupe: { cabin: [[0.95, BELT], [-1.55, BELT], [-0.55, 1.3], [0.3, 1.31]], spoiler: true, lowNose: 0 },
   // Upright three-box saloon.
   sedan: { cabin: [[0.95, BELT], [-1.3, BELT], [-0.85, 1.4], [0.35, 1.42]], spoiler: false, lowNose: 0.02 },
-  // Short hatchback with a tall tail.
+  // Short hatchback with a tall tail (a Corolla-style five-door).
   hatch: { cabin: [[0.95, BELT], [-1.8, BELT], [-1.5, 1.47], [0.4, 1.49]], spoiler: false, lowNose: 0.04 },
+  // Rounded bug: short sloping bonnet and tail, a domed painted roof, bulging fenders, round bulb headlights.
+  beetle: {
+    cabin: [[0.85, 1.05], [-1.35, 1.05], [-1.25, 1.36], [-0.8, 1.68], [-0.1, 1.77], [0.45, 1.62], [0.75, 1.3]],
+    spoiler: false,
+    lowNose: 0,
+    top: [[2.14, 0.5], [2.08, 0.76], [1.75, 0.95], [1.25, 1.03], [0.9, 1.05], [-1.2, 1.05], [-1.8, 0.95], [-2.1, 0.76], [-2.14, 0.5]],
+    paintedCabin: true,
+    roundLights: true,
+    fenders: true,
+  },
+  // Square-rigged off-roader: flat bonnet, upright windscreen, slab sides, round lights, spare wheel.
+  jeep: {
+    cabin: [[0.85, 1.02], [-1.9, 1.05], [-1.9, 1.8], [0.68, 1.84]],
+    spoiler: false,
+    lowNose: 0,
+    top: [[2.14, 0.5], [2.14, 1.0], [0.85, 1.02], [-1.9, 1.05], [-2.14, 1.0], [-2.14, 0.5]],
+    roundLights: true,
+    offroad: true,
+  },
 };
 
 /** Side silhouette of the lower body (z along the car, y up) with wheel arch cut-outs, extruded across the car. */
@@ -43,13 +77,8 @@ function buildBody(style: CarStyle): THREE.BufferGeometry {
     s.absarc(cz, WHEEL_R, archR, Math.PI + a, -a, true); // over the top of the wheel
   }
   s.lineTo(2.1, floor);
-  s.lineTo(2.12, 0.52);
-  s.lineTo(2.05, 0.7 - nose);
-  s.lineTo(1.4, 0.86 - nose);
-  s.lineTo(0.95, BELT);
-  s.lineTo(-1.3, BELT);
-  s.lineTo(-2.0, 0.93);
-  s.lineTo(-2.12, 0.62);
+  const top: [number, number][] = STYLES[style].top ?? [[2.12, 0.52], [2.05, 0.7 - nose], [1.4, 0.86 - nose], [0.95, BELT], [-1.3, BELT], [-2.0, 0.93], [-2.12, 0.62]];
+  for (const [z, y] of top) s.lineTo(z, y);
   s.closePath();
 
   const depth = BODY_WIDTH - 0.1;
@@ -125,32 +154,64 @@ export function buildCarModel(color: number, style: CarStyle): CarModel {
   };
   const box = (w: number, h: number, d: number) => new THREE.BoxGeometry(w, h, d);
 
+  const spec = STYLES[style];
+
   // Body and cabin.
   group.add(new THREE.Mesh(buildBody(style), paint));
-  group.add(new THREE.Mesh(buildCabin(style), glass));
+  group.add(new THREE.Mesh(buildCabin(style), spec.paintedCabin ? paint : glass));
 
-  // Roof panel in body colour, following the roof's slope.
-  const [, , rearTop, frontTop] = STYLES[style].cabin;
-  const roofLen = frontTop[0] - rearTop[0] - 0.12;
-  const roof = add(box(CABIN_WIDTH - 0.02, 0.06, roofLen), paint, 0, (rearTop[1] + frontTop[1]) / 2 + 0.02, (rearTop[0] + frontTop[0]) / 2);
-  roof.rotation.x = -Math.atan2(frontTop[1] - rearTop[1], frontTop[0] - rearTop[0]);
+  if (spec.paintedCabin) {
+    // A painted dome with window panes set into its sides, windscreen and tail.
+    for (const sx of [-1, 1]) add(box(0.03, 0.3, 1.05), glass, sx * (CABIN_WIDTH / 2 - 0.04), 1.4, -0.2);
+    add(box(1.1, 0.3, 0.03), glass, 0, 1.43, 0.66).rotation.x = -0.62;
+    add(box(0.9, 0.22, 0.03), glass, 0, 1.38, -1.18).rotation.x = 0.55;
+  } else {
+    // Roof panel in body colour, following the roof's slope.
+    const [, , rearTop, frontTop] = spec.cabin;
+    const roofLen = frontTop[0] - rearTop[0] - 0.12;
+    const roof = add(box(CABIN_WIDTH - 0.02, 0.06, roofLen), paint, 0, (rearTop[1] + frontTop[1]) / 2 + 0.02, (rearTop[0] + frontTop[0]) / 2);
+    roof.rotation.x = -Math.atan2(frontTop[1] - rearTop[1], frontTop[0] - rearTop[0]);
+  }
 
   // Front end: lights, grille, intake and splitter.
-  const noseY = 0.7 - STYLES[style].lowNose;
+  const noseY = 0.7 - spec.lowNose;
   for (const sx of [-1, 1]) {
-    add(box(0.36, 0.1, 0.07), headlight, sx * 0.62, noseY - 0.02, 2.06);
-    add(box(0.42, 0.09, 0.06), taillight, sx * 0.62, 0.78, -2.1);
+    if (spec.roundLights && spec.offroad) {
+      add(new THREE.CylinderGeometry(0.2, 0.2, 0.1, 16).rotateX(Math.PI / 2), headlight, sx * 0.62, 0.8, 2.12);
+      add(new THREE.CylinderGeometry(0.24, 0.24, 0.06, 16).rotateX(Math.PI / 2), trim, sx * 0.62, 0.8, 2.09);
+    } else if (spec.roundLights) {
+      // Bulb lights standing proud on the fender tops.
+      add(new THREE.SphereGeometry(0.2, 14, 10).scale(1, 1, 0.8), headlight, sx * 0.68, 0.98, 1.82);
+    } else {
+      add(box(0.36, 0.1, 0.07), headlight, sx * 0.62, noseY - 0.02, 2.06);
+    }
+    add(box(0.42, 0.09, 0.06), taillight, sx * 0.62, spec.offroad ? 0.85 : 0.78, spec.offroad ? -2.16 : -2.1);
   }
-  add(box(0.7, 0.1, 0.05), trim, 0, noseY - 0.1, 2.1);
-  add(box(1.3, 0.12, 0.06), trim, 0, 0.42, 2.11);
-  add(box(1.78, 0.04, 0.3), trim, 0, 0.3, 1.98);
-  add(box(1.8, 0.05, 0.12), trim, 0, 0.68, -2.1); // rear diffuser strip
+  if (spec.offroad) {
+    // Black bumpers front and back, slatted grille, fender flares and a spare wheel on the tail.
+    add(box(2.0, 0.22, 0.28), trim, 0, 0.42, 2.18);
+    add(box(2.0, 0.22, 0.28), trim, 0, 0.42, -2.18);
+    add(box(0.74, 0.4, 0.05), trim, 0, 0.8, 2.15);
+    for (let i = -3; i <= 3; i++) add(box(0.05, 0.36, 0.03), paint, i * 0.1, 0.8, 2.18);
+    for (const sx of [-1, 1]) for (const sz of [-1, 1]) add(box(0.2, 0.08, 1.05), trim, sx * 0.97, 0.88, sz * WHEEL_Z);
+    const spare = add(new THREE.CylinderGeometry(0.42, 0.42, 0.26, 18).rotateX(Math.PI / 2), trim, 0, 1.1, -2.42);
+    spare.castShadow = true;
+    add(new THREE.CylinderGeometry(0.2, 0.2, 0.28, 12).rotateX(Math.PI / 2), paint, 0, 1.1, -2.42);
+  } else if (spec.fenders) {
+    // Bulging fenders over each wheel.
+    for (const sx of [-1, 1]) for (const sz of [-1, 1]) add(new THREE.SphereGeometry(0.62, 14, 10).scale(0.38, 0.75, 1.55), paint, sx * 0.84, 0.72, sz * WHEEL_Z);
+  } else {
+    add(box(0.7, 0.1, 0.05), trim, 0, noseY - 0.1, 2.1);
+    add(box(1.3, 0.12, 0.06), trim, 0, 0.42, 2.11);
+    add(box(1.78, 0.04, 0.3), trim, 0, 0.3, 1.98);
+    add(box(1.8, 0.05, 0.12), trim, 0, 0.68, -2.1); // rear diffuser strip
+  }
   // Side skirts and door seams.
   for (const sx of [-1, 1]) {
     add(box(0.05, 0.08, 2.0), trim, sx * 0.93, 0.34, 0);
     for (const z of [0.2, -0.75]) add(box(0.012, 0.4, 0.012), trim, sx * 0.953, 0.72, z);
     // Wing mirror.
-    add(box(0.14, 0.09, 0.13), paint, sx * 0.97, 1.02, 0.7);
+    add(box(0.14, 0.09, 0.13), paint, sx * 0.97, spec.paintedCabin || spec.offroad ? 1.14 : 1.02, 0.7);
   }
   // Dark wheel wells so the arches read as depth, not as a see-through gap.
   for (const sx of [-1, 1]) {
@@ -161,7 +222,7 @@ export function buildCarModel(color: number, style: CarStyle): CarModel {
     }
   }
 
-  if (STYLES[style].spoiler) {
+  if (spec.spoiler) {
     add(box(1.6, 0.05, 0.3), paint, 0, 1.2, -1.95);
     for (const sx of [-1, 1]) add(box(0.06, 0.2, 0.2), trim, sx * 0.55, 1.08, -1.95);
   }

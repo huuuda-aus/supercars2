@@ -54,6 +54,10 @@ export class Minimap {
     this.drawCircuit();
   }
 
+  setVisible(visible: boolean): void {
+    this.canvas.style.display = visible ? '' : 'none';
+  }
+
   /** World (x, z) to panel css pixels. North-up like the main camera: +x right, +z down. */
   private toPanel(x: number, z: number): [number, number] {
     return [PAD + (x - this.minX) * this.scale, PAD + (z - this.minZ) * this.scale];

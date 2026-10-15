@@ -1,15 +1,20 @@
 import * as THREE from 'three';
 import { AiDriver, LEVELS } from './ai';
 import { Car } from './car';
+import { garageCar, GARAGE, type CarId } from './garage';
 import { beginCollisionStep, collideCars } from './collision';
 import { Input, type Controls } from './input';
 import { Minimap } from './minimap';
 import { PICKUP_COLOURS, Pickups } from './pickups';
+import { buildCarModel } from './carmodel';
+import { loadGame, loadSettings, newGame, prizeFor, saveGame, saveSettings, type SaveGame } from './save';
+import { Screens } from './screens';
+import { trackForRace, TRACK_LIST } from './tracks';
 import { formatTime, Race } from './race';
 import { applyGroundUVs, createTrees, makeGrassTexture } from './scenery';
 import { Skidmarks } from './skidmarks';
 import { Track } from './track';
-import { aiStats, RIVAL_CAR_TIER, starterStats } from './upgrades';
+import { aiStats, MAX_UPGRADE_LEVEL, RIVAL_CAR_TIER, starterStats, statsFor, upgradePrice, type UpgradeSlot } from './upgrades';
 import { Weapons } from './weapons';
 
 const STEP = 1 / 120; // fixed physics timestep, independent of display refresh rate
@@ -71,7 +76,8 @@ applyGroundUVs(track.terrain);
 const trees = createTrees(track);
 scene.add(trees);
 
-const car = new Car('You', 0xe03030, undefined, 'coupe');
+let playerStats = starterStats();
+let car = new Car('You', 0xd8352a, playerStats, 'hatch');
 const rivals = [
   { car: new Car('Blue', 0x3070e0, undefined, 'sedan'), lane: 3.5, grid: 14 },
   { car: new Car('Yellow', 0xe0c030, undefined, 'hatch'), lane: -3.5, grid: 24 },
@@ -100,14 +106,14 @@ pickups.onCollect = (c, _kind, text) => {
   pickupMsgTime = 2;
 };
 const race = new Race();
-let levelIndex = 1;
+let levelIndex = loadSettings().difficulty;
 
 function resetRace(): void {
   weapons.clear();
   skidmarks.clear();
   pickups.reset();
   pickupMsgTime = 0;
-  car.stats = starterStats();
+  car.stats = playerStats;
   car.placeOnTrack(track, track.sampleCount - 6);
   for (const r of rivals) {
     r.car.stats = aiStats(RIVAL_CAR_TIER);
@@ -173,6 +179,213 @@ function updateHealthBar(): void {
   hpFill.style.background = fraction > 0.6 ? '#3fcf5a' : fraction > 0.3 ? '#e6c230' : '#e03a2a';
   hpText.textContent = car.wrecked ? 'WRECKED' : `HP ${Math.ceil(hp)}`;
 }
+
+// --- Screens and game flow -------------------------------------------------------------------------------------
+const screens = new Screens(document.getElementById('screen')!);
+
+/** A turntable stage for the car chooser. */
+const previewScene = new THREE.Scene();
+previewScene.background = new THREE.Color(0x1b2a21);
+previewScene.add(new THREE.HemisphereLight(0xcfe4ff, 0x3b4a30, 1.1));
+const previewKey = new THREE.DirectionalLight(0xfff1d8, 2.2);
+previewKey.position.set(-6, 9, 7);
+previewScene.add(previewKey);
+const stage = new THREE.Mesh(new THREE.CylinderGeometry(4.2, 4.4, 0.2, 48), new THREE.MeshStandardMaterial({ color: 0x2d362b, roughness: 0.9 }));
+stage.position.y = -0.1;
+previewScene.add(stage);
+const previewCam = new THREE.PerspectiveCamera(38, 1, 0.1, 100);
+previewCam.position.set(7, 3.2, 7.5);
+previewCam.lookAt(-2, 0.8, 0.5); // looks left of the car, so the car sits right of the menu panel
+let previewModel: THREE.Group | null = null;
+let previewing = false;
+
+function setPreview(id: CarId): void {
+  if (previewModel) previewScene.remove(previewModel);
+  const def = garageCar(id);
+  previewModel = buildCarModel(def.color, def.style).group;
+  previewScene.add(previewModel);
+}
+
+type Mode = 'menu' | 'race';
+let mode: Mode = 'menu';
+let careerGame: SaveGame | null = null; // the career being raced, or null in training
+let trainingTrack = 0;
+
+function setRaceUi(on: boolean): void {
+  const display = on ? '' : 'none';
+  hud.style.display = hpBar.style.display = banner.style.display = display;
+  minimap.setVisible(on);
+}
+
+/** Put a different car under the player, with the stats in `playerStats`. */
+function setPlayerCar(id: CarId): void {
+  const def = garageCar(id);
+  scene.remove(car.mesh);
+  car = new Car('You', def.color, playerStats, def.style);
+  scene.add(car.mesh);
+  shade(car.mesh, true, true);
+  allCars[0] = car;
+}
+
+/** Leave the race (if any), reset the track for the backdrop and show a menu screen. */
+function enterMenu(show: () => void): void {
+  mode = 'menu';
+  previewing = false;
+  race.toMenu();
+  setRaceUi(false);
+  resetRace();
+  input.clear();
+  show();
+}
+
+function startRace(): void {
+  levelIndex = loadSettings().difficulty;
+  if (careerGame) {
+    playerStats = statsFor(careerGame.levels);
+    setPlayerCar(careerGame.carId);
+  } else {
+    playerStats = starterStats();
+    setPlayerCar(loadGame()?.carId ?? GARAGE[GARAGE.length - 1].id);
+  }
+  resetRace();
+  race.start();
+  mode = 'race';
+  screens.hide();
+  setRaceUi(true);
+  input.clear();
+}
+
+function raceTrackName(): string {
+  return careerGame ? trackForRace(careerGame.racesDone).name : TRACK_LIST[trainingTrack].name;
+}
+
+/** The player is done with the race results: bank the result (career) and move on. */
+function finishRace(): void {
+  if (!careerGame) {
+    showTrainingTracks();
+    return;
+  }
+  const position = race.standings(allCars, track).indexOf(car) + 1;
+  const prize = prizeFor(position);
+  careerGame.money += prize;
+  careerGame.lastRace = { track: raceTrackName(), position, finished: car.finished, prize };
+  careerGame.racesDone++;
+  saveGame(careerGame);
+  showShop(careerGame);
+}
+
+function quitRace(): void {
+  if (careerGame) showTitle();
+  else showTrainingTracks();
+}
+
+function showTitle(): void {
+  enterMenu(() =>
+    screens.showTitle({
+      canResume: loadGame() !== null,
+      onNew: () => {
+        if (loadGame() && !confirm('Start a new game? Your saved progress will be lost.')) return;
+        showCarSelect();
+      },
+      onResume: () => {
+        const game = loadGame();
+        if (game) showShop(game);
+      },
+      onTraining: showTrainingTracks,
+      onSettings: showSettings,
+    }),
+  );
+}
+
+function showCarSelect(): void {
+  enterMenu(() => {
+    previewing = true;
+    screens.showCarSelect({
+      onPreview: setPreview,
+      onPick: (id) => {
+        careerGame = newGame(id);
+        saveGame(careerGame);
+        startRace();
+      },
+      onBack: showTitle,
+    });
+  });
+}
+
+function showTrainingTracks(): void {
+  careerGame = null;
+  enterMenu(() =>
+    screens.showTracks({
+      tracks: TRACK_LIST,
+      onPick: (i) => {
+        trainingTrack = i;
+        startRace();
+      },
+      onBack: showTitle,
+    }),
+  );
+}
+
+function showSettings(): void {
+  enterMenu(() =>
+    screens.showSettings({
+      levels: LEVELS.map((l) => l.name),
+      difficulty: loadSettings().difficulty,
+      onDifficulty: (i) => {
+        saveSettings({ difficulty: i });
+        levelIndex = i;
+      },
+      onBack: showTitle,
+    }),
+  );
+}
+
+/** Buy the next level of an upgrade if there is one and it is affordable, then redraw the shop. */
+function buyUpgrade(game: SaveGame, slot: UpgradeSlot): void {
+  const level = game.levels[slot];
+  if (level >= MAX_UPGRADE_LEVEL) return;
+  const price = upgradePrice(level + 1);
+  if (game.money < price) return;
+  game.money -= price;
+  game.levels[slot] = level + 1;
+  saveGame(game);
+  showShop(game, slot);
+}
+
+function showShop(game: SaveGame, focus?: UpgradeSlot): void {
+  careerGame = game;
+  playerStats = statsFor(game.levels);
+  setPlayerCar(game.carId);
+  enterMenu(() =>
+    screens.showShop({
+      game,
+      carName: garageCar(game.carId).name,
+      nextTrack: trackForRace(game.racesDone),
+      focus,
+      onBuy: (slot) => buyUpgrade(game, slot),
+      onNextRace: startRace,
+      onMenu: showTitle,
+    }),
+  );
+}
+
+/** Menu frames: no simulation, just a slowly circling view of the track (or the turntable in the car chooser). */
+function renderMenu(now: number): void {
+  if (previewing && previewModel) {
+    previewModel.rotation.y = now / 1700;
+    previewCam.aspect = innerWidth / innerHeight;
+    previewCam.updateProjectionMatrix();
+    renderer.render(previewScene, previewCam);
+    return;
+  }
+  const a = now / 14000;
+  sun.target.position.set(0, 0, 0);
+  sun.position.copy(sun.target.position).add(SUN_OFFSET);
+  chase.position.set(Math.cos(a) * 150, 85, Math.sin(a) * 150);
+  chase.lookAt(0, 0, 0);
+  renderer.render(scene, chase);
+}
+
 let acc = 0;
 let last = performance.now();
 
@@ -184,45 +397,44 @@ function controlsFor(c: Car, live: Controls): Controls {
   return c.finished ? coast(c) : live;
 }
 
-function handleMenuKeys(): void {
-  for (let i = 0; i < LEVELS.length; i++) {
-    if (input.tapped(`Digit${i + 1}`) && race.state === 'menu') {
-      levelIndex = i;
-      resetRace();
-    }
+/** Keys that only matter during a race. */
+function raceKeys(): void {
+  if (input.tapped('Escape')) {
+    quitRace();
+    return;
   }
-  if (input.tapped('Enter') && (race.state === 'menu' || car.finished || car.wrecked)) {
-    if (car.finished || car.wrecked) {
-      race.toMenu();
-      resetRace(); // clears car.finished/wrecked, otherwise Enter in the menu would never start a race
-    } else {
-      resetRace();
-      race.start();
-    }
+  if (input.tapped('Enter') && (car.finished || car.wrecked)) {
+    finishRace();
+    return;
   }
-  if (input.tapped('KeyR') && race.state !== 'menu') {
+  if (input.tapped('KeyR')) {
     resetRace();
     race.start();
   }
 }
 
 function bannerText(): string {
-  if (race.state === 'menu') {
-    const lv = LEVELS.map((l, i) => `${i === levelIndex ? '▶' : ' '} [${i + 1}] ${l.name}`).join('\n');
-    return `SUPER CARS\n\nAI difficulty\n${lv}\n\nEnter to start`;
-  }
   if (race.state === 'countdown') return String(Math.ceil(race.countdown));
   if (car.finished || car.wrecked) {
     const rows = race.standings(allCars, track).map((c, i) => {
       const t = c.finished ? formatTime(c.finishTime) : c.wrecked ? 'wrecked' : 'racing…';
-      return `${i + 1}. ${c.name.padEnd(7)} ${t}${c === car ? '  <' : ''}`;
+      const prize = careerGame ? `  $${prizeFor(i + 1)}` : '';
+      return `${i + 1}. ${c.name.padEnd(7)} ${t.padEnd(8)}${prize}${c === car ? '  <' : ''}`;
     });
-    return `${car.wrecked ? 'WRECKED' : 'FINISHED'}\n\n${rows.join('\n')}\n\nEnter: menu · R: restart`;
+    return `${car.wrecked ? 'WRECKED' : 'FINISHED'}\n\n${rows.join('\n')}\n\nEnter: continue · R: restart · Esc: quit`;
   }
   return race.time < 1 ? 'GO!' : '';
 }
 
 function frame(now: number): void {
+  if (mode === 'menu') {
+    last = now;
+    acc = 0;
+    input.clear();
+    renderMenu(now);
+    requestAnimationFrame(frame);
+    return;
+  }
   acc += Math.min((now - last) / 1000, 0.1);
   pickupMsgTime = Math.max(0, pickupMsgTime - (now - last) / 1000);
   last = now;
@@ -267,7 +479,7 @@ function frame(now: number): void {
     acc -= STEP;
   }
   if (input.tapped('KeyC')) useOrtho = !useOrtho;
-  handleMenuKeys();
+  raceKeys();
 
   minimap.draw(allCars, car, [
     ...weapons.missiles.map((m) => ({ x: m.x, z: m.z, color: '#ffb030', size: 2.2 })),
@@ -289,4 +501,5 @@ function frame(now: number): void {
   banner.textContent = bannerText();
   requestAnimationFrame(frame);
 }
+showTitle();
 requestAnimationFrame(frame);

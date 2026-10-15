@@ -589,9 +589,13 @@ export class Car {
     const maxSpeed = this.topSpeed * (this.offroad ? OFFROAD_MAX : 1);
     let ax = 0;
     const boost = this.nitroTimer > 0 ? 1 + (NITRO_ACCEL - 1) * st.nitro : 1;
-    const engine = u < maxSpeed && u > -1 ? ACCEL * st.accel * boost * this.throttleState : 0;
+    // Rolling backwards, the accelerator brakes the car (as the brake does when rolling forwards) until it is moving
+    // forwards again, then the engine takes over. Otherwise changing direction would be a long coast to a stop.
+    const reversing = u < -0.5;
+    const engine = u < maxSpeed && !reversing ? ACCEL * st.accel * boost * this.throttleState : 0;
     const surface = (this.offroad ? OFFROAD_GRIP : 1) * (this.oilTimer > 0 ? OIL_GRIP : 1);
     ax += this.driveForce(engine, u, surface, dt);
+    if (reversing) ax += BRAKE * st.brake * this.throttleState;
     if (this.brakeState > 0) ax -= (u > 0.5 ? BRAKE * st.brake : u > -REVERSE_MAX ? ACCEL * st.accel * 0.6 : 0) * this.brakeState;
     const pedal = Math.max(this.throttleState, this.brakeState);
     if (pedal < 1) {

@@ -19,6 +19,11 @@ export class Input implements Controls {
     addEventListener('blur', () => this.down.clear());
   }
 
+  /** Forget key presses that nobody read (e.g. made on a menu screen). */
+  clear(): void {
+    this.pressed.clear();
+  }
+
   held(...codes: string[]): boolean {
     return codes.some((c) => this.down.has(c));
   }

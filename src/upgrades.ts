@@ -22,6 +22,29 @@ const TABLE: Record<UpgradeSlot, { stat: keyof CarStats; values: number[] }> = {
   turbo: { stat: 'nitro', values: [0.7, 0.9, 1.1, 1.3] }, // strength of a nitro charge
 };
 
+/** What the shop shows for each slot. */
+export const SLOT_INFO: Record<UpgradeSlot, { title: string; stat: string; blurb: string }> = {
+  engine: { title: 'Engine', stat: 'Acceleration', blurb: 'More power. Needs tyres to match, or it just spins.' },
+  transmission: { title: 'Transmission', stat: 'Top speed', blurb: 'Longer gearing for a higher top speed.' },
+  tyres: { title: 'Tyres', stat: 'Grip', blurb: 'Stick to the road: corner harder, launch cleaner.' },
+  brakes: { title: 'Brakes', stat: 'Braking', blurb: 'Stop later and brake deeper into the bend.' },
+  steering: { title: 'Steering', stat: 'Steering lock', blurb: 'Quicker, sharper turn-in.' },
+  armor: { title: 'Armor', stat: 'Hit points', blurb: 'Plating that soaks up the knocks.' },
+  turbo: { title: 'Turbo', stat: 'Nitro power', blurb: 'Bigger kick from every nitro charge.' },
+};
+
+/** Price of buying a slot's next level (index 0 = level 1). */
+const UPGRADE_PRICES = [1500, 3500, 7000];
+
+/** What it costs to take a slot to `level` (1..MAX_UPGRADE_LEVEL). */
+export const upgradePrice = (level: number): number => UPGRADE_PRICES[level - 1];
+
+/** A slot's value at a level as the shop shows it: hit points as a number, everything else as a percentage of a good car. */
+export function formatSlotValue(slot: UpgradeSlot, level: number): string {
+  const v = slotValue(slot, level);
+  return slot === 'armor' ? `${Math.round(v)} HP` : `${Math.round(v * 100)}%`;
+}
+
 export const STOCK_LEVELS: UpgradeLevels = { engine: 0, transmission: 0, tyres: 0, brakes: 0, steering: 0, armor: 0, turbo: 0 };
 
 /** Value of a slot at a (possibly fractional) level, interpolating between the table entries. */
