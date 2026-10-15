@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import type { Car } from './car';
+import { HULL_HX, HULL_HZ } from './spec';
 import type { Track } from './track';
 
 const MISSILE_SPEED = 65; // m/s over the ground
@@ -7,6 +8,14 @@ const MISSILE_LIFE = 2.2; // seconds
 const MISSILE_OWNER_GRACE = 0.35; // the shooter cannot be hit by its own missile right away
 const MISSILE_HIT_RADIUS = 1.7;
 const MISSILE_BLAST = { radius: 6.5, power: 11, damage: 30, lift: 3 };
+
+const GUN_RATE = 11; // shots per second
+const GUN_SPEED = 120; // m/s
+const GUN_LIFE = 0.7; // seconds, so about 80 m of range
+const GUN_SPREAD = 0.045; // rad, half-angle of the random cone
+const GUN_DAMAGE = 1.2; // HP per bullet that hits
+const GUN_MUZZLE = { forward: 2.0, side: 0.5 };
+const MAX_BULLETS = 200;
 
 const MINE_ARM_TIME = 1.0; // seconds before a dropped mine goes live (for everyone, its owner included)
 const MINE_TRIGGER_RADIUS = 1.8;
@@ -16,6 +25,8 @@ const MINE_BLAST = { radius: 7.5, power: 13, damage: 36, lift: 8 };
 
 export interface Missile { owner: Car; x: number; z: number; y: number; heading: number; age: number; index: number; mesh: THREE.Object3D }
 export interface Mine { owner: Car; x: number; z: number; y: number; age: number; mesh: THREE.Object3D }
+interface Bullet { owner: Car; x: number; z: number; y: number; vx: number; vz: number; age: number; index: number }
+interface Spark { mesh: THREE.Mesh; age: number; life: number; size: number }
 interface Explosion { mesh: THREE.Mesh; age: number; life: number; radius: number }
 
 /** Forward missiles, rear mines and their explosions. Ammo lives on the cars. */
@@ -23,8 +34,12 @@ export class Weapons {
   readonly missiles: Missile[] = [];
   readonly mines: Mine[] = [];
   private readonly explosions: Explosion[] = [];
-  readonly stats = { missilesFired: 0, missileCarHits: 0, missileWallHits: 0, minesLaid: 0, mineHits: 0 };
+  readonly stats = { missilesFired: 0, missileCarHits: 0, missileWallHits: 0, minesLaid: 0, mineHits: 0, bulletsFired: 0, bulletHits: 0 };
   private time = 0;
+  private readonly bullets: Bullet[] = [];
+  private readonly sparks: Spark[] = [];
+  private readonly nextShot = new Map<Car, number>();
+  private muzzleSide = 1;
   private cars: Car[] = [];
 
   private readonly missileMat = new THREE.MeshStandardMaterial({ color: 0xcfd3d8, roughness: 0.4, metalness: 0.4 });
@@ -33,6 +48,10 @@ export class Weapons {
   private readonly mineBodyMat = new THREE.MeshStandardMaterial({ color: 0x2b2e33, roughness: 0.6, metalness: 0.5 });
   private readonly mineLightMat = new THREE.MeshStandardMaterial({ color: 0x500000, emissive: 0xff2010, emissiveIntensity: 1, roughness: 0.3 });
   private readonly sphere = new THREE.SphereGeometry(1, 18, 14);
+  private readonly sparkMat = new THREE.MeshBasicMaterial({ color: 0xffc040, blending: THREE.AdditiveBlending, depthWrite: false, transparent: true });
+  private readonly sparkGeo = new THREE.IcosahedronGeometry(1, 0);
+  private readonly tracers: THREE.InstancedMesh;
+  private readonly dummy = new THREE.Object3D();
   // Shared by every missile and mine, so firing does not allocate GPU geometry.
   private readonly missileBodyGeo = new THREE.CylinderGeometry(0.13, 0.13, 1.3, 10).rotateX(Math.PI / 2);
   private readonly missileNoseGeo = new THREE.ConeGeometry(0.13, 0.45, 10).rotateX(Math.PI / 2).translate(0, 0, 0.85);
@@ -41,7 +60,15 @@ export class Weapons {
   private readonly mineDiscGeo = new THREE.CylinderGeometry(0.6, 0.7, 0.2, 18);
   private readonly mineLightGeo = new THREE.CylinderGeometry(0.16, 0.16, 0.08, 10);
 
-  constructor(private readonly scene: THREE.Scene, private readonly track: Track) {}
+  constructor(private readonly scene: THREE.Scene, private readonly track: Track) {
+    // One instanced mesh draws every bullet in flight as a short glowing streak.
+    const tracerGeo = new THREE.BoxGeometry(0.07, 0.07, 1.5).translate(0, 0, -0.6);
+    this.tracers = new THREE.InstancedMesh(tracerGeo, new THREE.MeshBasicMaterial({ color: 0xffe36a }), MAX_BULLETS);
+    this.tracers.count = 0;
+    this.tracers.frustumCulled = false;
+    this.tracers.userData.noShadow = true;
+    scene.add(this.tracers);
+  }
 
   /** Remove everything (race restart). */
   clear(): void {
@@ -51,7 +78,10 @@ export class Weapons {
       this.scene.remove(e.mesh);
       (e.mesh.material as THREE.Material).dispose();
     }
-    this.missiles.length = this.mines.length = this.explosions.length = 0;
+    for (const s of this.sparks) this.scene.remove(s.mesh);
+    this.missiles.length = this.mines.length = this.explosions.length = this.sparks.length = this.bullets.length = 0;
+    this.nextShot.clear();
+    this.tracers.count = 0;
   }
 
   fireMissile(car: Car): boolean {
@@ -78,6 +108,27 @@ export class Weapons {
     };
     this.missiles.push(missile);
     this.syncMissile(missile);
+    return true;
+  }
+
+  /** Hold-to-fire machine gun: call every step while the trigger is down; the fire rate limits it. */
+  fireGun(car: Car): boolean {
+    if (car.wrecked || car.airborne || car.ammo.bullets <= 0 || this.bullets.length >= MAX_BULLETS) return false;
+    if (this.time < (this.nextShot.get(car) ?? 0)) return false;
+    this.nextShot.set(car, this.time + 1 / GUN_RATE);
+    car.ammo.bullets--;
+    this.stats.bulletsFired++;
+    // Twin guns, firing alternately from either side of the nose.
+    this.muzzleSide = -this.muzzleSide;
+    const fx = Math.sin(car.heading);
+    const fz = Math.cos(car.heading);
+    const x = car.x + fx * GUN_MUZZLE.forward + fz * GUN_MUZZLE.side * this.muzzleSide;
+    const z = car.z + fz * GUN_MUZZLE.forward - fx * GUN_MUZZLE.side * this.muzzleSide;
+    const dir = car.heading + (Math.random() * 2 - 1) * GUN_SPREAD;
+    this.bullets.push({
+      owner: car, x, z, y: car.y + 0.6, vx: Math.sin(dir) * GUN_SPEED, vz: Math.cos(dir) * GUN_SPEED, age: 0, index: car.trackIndex,
+    });
+    this.spark(x, car.y + 0.6, z, 0.4, 0.05); // muzzle flash
     return true;
   }
 
@@ -113,6 +164,9 @@ export class Weapons {
         this.explode(car.x, car.z, car.y + 0.6, { radius: 5, power: 0, damage: 0, lift: 0 }, 1.6);
       }
     }
+
+    this.updateBullets(dt, cars);
+    this.updateSparks(dt);
 
     for (let i = this.missiles.length - 1; i >= 0; i--) {
       const m = this.missiles[i];
@@ -167,6 +221,80 @@ export class Weapons {
       }
       e.mesh.scale.setScalar(Math.max(0.1, e.radius * 0.55 * Math.sqrt(t)));
       (e.mesh.material as THREE.MeshBasicMaterial).opacity = 0.9 * (1 - t);
+    }
+  }
+
+  private updateBullets(dt: number, cars: Car[]): void {
+    for (let i = this.bullets.length - 1; i >= 0; i--) {
+      const b = this.bullets[i];
+      b.age += dt;
+      let hit = b.age > GUN_LIFE;
+      // Two checks per step (halfway and at the end) so a fast bullet cannot skip over a car.
+      for (const frac of [0.5, 1]) {
+        if (hit) break;
+        const px = b.x + b.vx * dt * frac;
+        const pz = b.z + b.vz * dt * frac;
+        const q = this.track.query(px, pz, b.index);
+        if (Math.abs(q.lateral) > this.track.wallOffset - 0.1) {
+          this.spark(px, b.y, pz, 0.35, 0.12);
+          hit = true;
+          break;
+        }
+        for (const c of cars) {
+          if (c === b.owner || c.wrecked || Math.abs(c.y + 0.6 - b.y) > 1.4) continue;
+          const dx = px - c.x;
+          const dz = pz - c.z;
+          const fx = Math.sin(c.heading);
+          const fz = Math.cos(c.heading);
+          if (Math.abs(dx * fx + dz * fz) < HULL_HZ + 0.15 && Math.abs(dx * fz - dz * fx) < HULL_HX + 0.15) {
+            c.damage(GUN_DAMAGE);
+            this.stats.bulletHits++;
+            this.spark(px, b.y, pz, 0.5, 0.14);
+            hit = true;
+            break;
+          }
+        }
+      }
+      if (hit) {
+        this.bullets.splice(i, 1);
+        continue;
+      }
+      b.x += b.vx * dt;
+      b.z += b.vz * dt;
+      const q = this.track.query(b.x, b.z, b.index);
+      b.index = q.index;
+      if (!q.gap) b.y = q.height + 0.6;
+    }
+    this.tracers.count = this.bullets.length;
+    this.bullets.forEach((b, i) => {
+      this.dummy.position.set(b.x, b.y, b.z);
+      this.dummy.rotation.set(0, Math.atan2(b.vx, b.vz), 0);
+      this.dummy.updateMatrix();
+      this.tracers.setMatrixAt(i, this.dummy.matrix);
+    });
+    this.tracers.instanceMatrix.needsUpdate = true;
+  }
+
+  /** A brief flash: muzzle flashes and bullet impacts. They share one material and shrink away. */
+  private spark(x: number, y: number, z: number, size: number, life: number): void {
+    const mesh = new THREE.Mesh(this.sparkGeo, this.sparkMat);
+    mesh.position.set(x, y, z);
+    mesh.scale.setScalar(size);
+    mesh.userData.noShadow = true;
+    this.scene.add(mesh);
+    this.sparks.push({ mesh, age: 0, life, size });
+  }
+
+  private updateSparks(dt: number): void {
+    for (let i = this.sparks.length - 1; i >= 0; i--) {
+      const s = this.sparks[i];
+      s.age += dt;
+      if (s.age >= s.life) {
+        this.scene.remove(s.mesh);
+        this.sparks.splice(i, 1);
+      } else {
+        s.mesh.scale.setScalar(Math.max(0.01, s.size * (1 - s.age / s.life)));
+      }
     }
   }
 

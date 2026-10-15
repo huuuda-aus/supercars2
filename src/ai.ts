@@ -1,5 +1,6 @@
 import { ACCEL, DRAG, TURN_DECEL, type Car } from './car';
 import type { Controls } from './input';
+import { worthChasing, type PickupSpot } from './pickups';
 import type { Track } from './track';
 
 const wrapAngle = (a: number) => Math.atan2(Math.sin(a), Math.cos(a));
@@ -17,12 +18,14 @@ export interface AiLevel {
   missile: number; // missile shots per second while a target is lined up (0 = never)
   mine: number; // mine drops per second while a car is right behind
   nitro: number; // nitro bursts per second on a clear straight
+  gun: number; // machine-gun bursts started per second while a car is dead ahead (0 = never)
+  pickup: number; // 0..1, how far off its line it will go for a crate it wants
 }
 
 export const LEVELS: AiLevel[] = [
-  { name: 'Rookie', corner: 0.3, wander: 3.0, steerNoise: 0.5, mistakesPerSec: 0.15, racingLine: 0, pit: 0, pitSkill: 0, missile: 0.15, mine: 0.1, nitro: 0.05 },
-  { name: 'Pro', corner: 0.65, wander: 1.8, steerNoise: 0.3, mistakesPerSec: 0.06, racingLine: 0.5, pit: 0.4, pitSkill: 0.5, missile: 0.6, mine: 0.4, nitro: 0.2 },
-  { name: 'Elite', corner: 0.95, wander: 0.8, steerNoise: 0.12, mistakesPerSec: 0.02, racingLine: 1, pit: 1.2, pitSkill: 0.9, missile: 1.5, mine: 1.0, nitro: 0.5 },
+  { name: 'Rookie', corner: 0.3, wander: 3.0, steerNoise: 0.5, mistakesPerSec: 0.15, racingLine: 0, pit: 0, pitSkill: 0, missile: 0.15, mine: 0.1, nitro: 0.05, gun: 0.3, pickup: 0.3 },
+  { name: 'Pro', corner: 0.65, wander: 1.8, steerNoise: 0.3, mistakesPerSec: 0.06, racingLine: 0.5, pit: 0.4, pitSkill: 0.5, missile: 0.6, mine: 0.4, nitro: 0.2, gun: 0.8, pickup: 0.7 },
+  { name: 'Elite', corner: 0.95, wander: 0.8, steerNoise: 0.12, mistakesPerSec: 0.02, racingLine: 1, pit: 1.2, pitSkill: 0.9, missile: 1.5, mine: 1.0, nitro: 0.5, gun: 2, pickup: 1 },
 ];
 
 /**
@@ -38,6 +41,7 @@ export class AiDriver implements Controls {
   fireMissile = false;
   dropMine = false;
   useNitro = false;
+  fireGun = false; // true on every tick of a burst
 
   private t = 0;
   private lane: number;
@@ -59,6 +63,8 @@ export class AiDriver implements Controls {
   private missileCooldown = 3;
   private mineCooldown = 3;
   private nitroCooldown = 4;
+  private gunBurst = 0; // seconds of firing left in the current burst
+  private gunCooldown = 2;
   pitsStarted = 0;
   pitsStruck = 0;
   private readonly phase1 = Math.random() * Math.PI * 2;
@@ -71,6 +77,7 @@ export class AiDriver implements Controls {
     private readonly level: AiLevel,
     private readonly others: () => Car[] = () => [],
     private readonly mines: () => { x: number; z: number }[] = () => [],
+    private readonly pickups: () => readonly PickupSpot[] = () => [],
   ) {
     this.lane = baseLane;
   }
@@ -80,7 +87,7 @@ export class AiDriver implements Controls {
     const n = track.sampleCount;
     const speed = Math.max(car.vf, 0);
     this.t += dt;
-    this.fireMissile = this.dropMine = this.useNitro = false;
+    this.fireMissile = this.dropMine = this.useNitro = this.fireGun = false;
 
     // A hard knock costs the driver a moment of control, longer for less skilled drivers.
     const impact = car.lastImpact;
@@ -121,7 +128,9 @@ export class AiDriver implements Controls {
     const towardInside = Math.sign(ahead.x * side.x + ahead.z * side.y - (now.x * side.x + now.z * side.y)) || 0;
     const cut = towardInside * Math.min(turn, 0.8) * 4 * level.racingLine;
     const limit = track.halfWidth - 2.2;
-    const laneTarget = clamp(this.baseLane * (1 - level.racingLine * 0.5) + wobble + cut + this.avoidance(), -limit, limit);
+    let laneTarget = clamp(this.baseLane * (1 - level.racingLine * 0.5) + wobble + cut + this.avoidance(), -limit, limit);
+    const crate = runUp ? null : this.pickupLane();
+    if (crate !== null) laneTarget = clamp(laneTarget * 0.2 + crate * 0.8, -limit, limit);
     this.lane += (laneTarget - this.lane) * Math.min(1, dt * (this.dodging ? 8 : 2));
 
     const tx = target.p.x + side.x * this.lane;
@@ -173,6 +182,8 @@ export class AiDriver implements Controls {
     this.missileCooldown -= dt;
     this.mineCooldown -= dt;
     this.nitroCooldown -= dt;
+    this.gunCooldown -= dt;
+    this.gunBurst -= dt;
     if (car.wrecked || car.finished || car.airborne) return;
     // No shooting or mine laying around the jump: a blast there costs a car the speed it needs to clear the pit.
     const inJumpZone = (i: number) => i >= track.gapFrom - 90 && i <= track.gapTo + 5;
@@ -191,11 +202,18 @@ export class AiDriver implements Controls {
         this.fireMissile = true;
         this.missileCooldown = 4;
       }
+      // Short bursts at a car right in front, only when it is lined up closely enough for the narrow cone to hit.
+      if (this.gunBurst <= 0 && this.gunCooldown <= 0 && car.ammo.bullets > 0 && g > 5 && g < 40 && Math.abs(s) < 1.6 && Math.random() < level.gun * dt) {
+        this.gunBurst = 0.5 + Math.random() * 0.6;
+        this.gunCooldown = 2.5;
+      }
       if (this.mineCooldown <= 0 && car.ammo.mines > 0 && g < -5 && g > -30 && Math.abs(s) < 3 && Math.random() < level.mine * dt) {
         this.dropMine = true;
         this.mineCooldown = 5;
       }
     }
+
+    if (this.gunBurst > 0 && car.ammo.bullets > 0 && !jumpZone) this.fireGun = true;
 
     // Nitro on a clear straight, never anywhere near the jump (it needs a steady, known speed).
     const nearJump = car.trackIndex >= track.gapFrom - 170 && car.trackIndex <= track.gapTo + 15;
@@ -214,6 +232,24 @@ export class AiDriver implements Controls {
     const n = this.track.sampleCount;
     const d = Math.abs(o.trackIndex - this.car.trackIndex);
     return Math.min(d, n - d) < 45;
+  }
+
+  /** Lane of the nearest wanted crate just ahead and not too far off the current line, or null. */
+  private pickupLane(): number | null {
+    const { car, level } = this;
+    if (level.pickup <= 0 || car.wrecked) return null;
+    const n = this.track.sampleCount;
+    let best: number | null = null;
+    let bestAhead = Infinity;
+    for (const spot of this.pickups()) {
+      if (!spot.active || !worthChasing(car, spot.kind)) continue;
+      const ahead = (spot.index - car.trackIndex + n) % n;
+      if (ahead < 4 || ahead > 40 || ahead >= bestAhead) continue;
+      if (Math.abs(spot.lane - this.lane) > 2 + 7 * level.pickup) continue;
+      best = spot.lane;
+      bestAhead = ahead;
+    }
+    return best;
   }
 
   /** Offset (along the track's side axis) that steers around slower cars directly ahead. */

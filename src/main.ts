@@ -4,6 +4,7 @@ import { Car, randomStats } from './car';
 import { beginCollisionStep, collideCars } from './collision';
 import { Input, type Controls } from './input';
 import { Minimap } from './minimap';
+import { PICKUP_COLOURS, Pickups } from './pickups';
 import { formatTime, Race } from './race';
 import { applyGroundUVs, createTrees, makeGrassTexture } from './scenery';
 import { Skidmarks } from './skidmarks';
@@ -88,17 +89,28 @@ allCars.forEach((c) => {
 const skidmarks = new Skidmarks(track);
 scene.add(skidmarks.mesh);
 const weapons = new Weapons(scene, track);
+const pickups = new Pickups(track);
+scene.add(pickups.group);
+let pickupMsg = '';
+let pickupMsgTime = 0;
+pickups.onCollect = (c, _kind, text) => {
+  if (c !== car) return;
+  pickupMsg = text;
+  pickupMsgTime = 2;
+};
 const race = new Race();
 let levelIndex = 1;
 
 function resetRace(): void {
   weapons.clear();
   skidmarks.clear();
+  pickups.reset();
+  pickupMsgTime = 0;
   car.placeOnTrack(track, track.sampleCount - 6);
   for (const r of rivals) {
     r.car.stats = randomStats();
     r.car.placeOnTrack(track, track.sampleCount - r.grid, r.lane);
-    r.ai = new AiDriver(r.car, track, r.lane, LEVELS[levelIndex], () => allCars, () => weapons.mines);
+    r.ai = new AiDriver(r.car, track, r.lane, LEVELS[levelIndex], () => allCars, () => weapons.mines, () => pickups.spots);
   }
 }
 resetRace();
@@ -207,6 +219,7 @@ function bannerText(): string {
 
 function frame(now: number): void {
   acc += Math.min((now - last) / 1000, 0.1);
+  pickupMsgTime = Math.max(0, pickupMsgTime - (now - last) / 1000);
   last = now;
   // Weapon keys: Z = missile, X = mine, Shift or N = nitro. Read once per frame.
   const wantMissile = input.tapped('KeyZ');
@@ -219,6 +232,7 @@ function frame(now: number): void {
   }
   while (acc >= STEP) {
     beginCollisionStep();
+    if (race.state === 'racing' && !car.finished && input.held('KeyF')) weapons.fireGun(car);
     race.update(STEP, allCars);
     car.step(STEP, controlsFor(car, input), track);
     for (const r of rivals) {
@@ -227,6 +241,7 @@ function frame(now: number): void {
         if (r.ai.fireMissile) weapons.fireMissile(r.car);
         if (r.ai.dropMine) weapons.dropMine(r.car);
         if (r.ai.useNitro) r.car.useNitro();
+        if (r.ai.fireGun) weapons.fireGun(r.car);
       }
       r.car.step(STEP, controlsFor(r.car, r.ai), track);
     }
@@ -234,6 +249,7 @@ function frame(now: number): void {
       for (let j = i + 1; j < allCars.length; j++) collideCars(allCars[i], allCars[j]);
     weapons.update(STEP, allCars);
     skidmarks.update(allCars);
+    pickups.update(STEP, race.state === 'racing' ? allCars : []); // crates only spin in the menu
     acc -= STEP;
   }
   if (input.tapped('KeyC')) useOrtho = !useOrtho;
@@ -241,6 +257,7 @@ function frame(now: number): void {
 
   minimap.draw(allCars, car, [
     ...weapons.missiles.map((m) => ({ x: m.x, z: m.z, color: '#ffb030', size: 2.2 })),
+    ...pickups.spots.filter((p) => p.active).map((p) => ({ x: p.x, z: p.z, color: PICKUP_COLOURS[p.kind], size: 2.4 })),
     ...weapons.mines.map((m) => ({ x: m.x, z: m.z, color: '#ff3020', size: 2.6 })),
   ]);
   updateCamera();
@@ -250,8 +267,8 @@ function frame(now: number): void {
   hud.textContent =
     `P${place}/${allCars.length}   lap ${lap}/${race.totalLaps}   ${formatTime(race.time)}\n` +
     `${(car.speed * 3.6).toFixed(0)} km/h   height ${car.y.toFixed(1)}${car.airborne ? '  AIR' : ''}${car.drifting ? `  DRIFT ${Math.round(car.driftCombo)}` : ''}${car.offroad ? '  OFFROAD' : ''}${car.nitroActive ? '  NITRO' : ''}\n` +
-    `missiles ${car.ammo.missiles}   mines ${car.ammo.mines}   nitro ${car.ammo.nitro}   drift pts ${Math.round(car.driftScore)}\n` +
-    `arrows/WASD drive · Space handbrake · Z missile · X mine · Shift/N nitro · C camera · R restart · ${LEVELS[levelIndex].name} AI`;
+    `missiles ${car.ammo.missiles}   mines ${car.ammo.mines}   nitro ${car.ammo.nitro}   gun ${car.ammo.bullets}   drift pts ${Math.round(car.driftScore)}${pickupMsgTime > 0 ? `   ${pickupMsg}` : ''}\n` +
+    `arrows/WASD drive · Space handbrake · Z missile · hold F gun · X mine · Shift/N nitro · C camera · R restart · ${LEVELS[levelIndex].name} AI`;
   updateHealthBar();
   banner.textContent = bannerText();
   requestAnimationFrame(frame);

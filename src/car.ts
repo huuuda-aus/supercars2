@@ -26,7 +26,10 @@ const LAND_SKID_SPEED = 6;
 const LAND_SKID_FULL = 20;
 const LAND_SKID_TIME = 0.4;
 const WRECK_DECEL = 3; // 1/s, how fast a destroyed car's leftover motion dies away
-export const START_LOADOUT = { missiles: 5, mines: 5, nitro: 3 };
+export const START_LOADOUT = { missiles: 5, mines: 5, nitro: 3, bullets: 100 };
+export type AmmoType = keyof typeof START_LOADOUT;
+/** Most a car can carry of each; pickups top up to this. */
+export const AMMO_MAX: Record<AmmoType, number> = { missiles: 10, mines: 10, nitro: 5, bullets: 200 };
 const STEER_RAMP = 6; // steering input slew (1/s), so a tap is a gentle turn and a hold is a sharp one
 const MAX_STEER_ANGLE = 0.42; // front wheel lock (rad)
 
@@ -208,6 +211,26 @@ export class Car {
     this.lastImpact = 0;
     this.airborne = false;
     this.syncMesh();
+  }
+
+  /** Space left in the magazine for this ammo type. */
+  ammoRoom(type: AmmoType): number {
+    return AMMO_MAX[type] - this.ammo[type];
+  }
+
+  /** Add ammo up to the carrying limit. Returns how much was actually taken. */
+  give(type: AmmoType, amount: number): number {
+    const taken = Math.max(0, Math.min(amount, this.ammoRoom(type)));
+    this.ammo[type] += taken;
+    return taken;
+  }
+
+  /** Restore health (never past 100, never for a wreck). Returns how much was restored. */
+  repair(amount: number): number {
+    if (this.wrecked) return 0;
+    const restored = Math.max(0, Math.min(amount, 100 - this.health));
+    this.health += restored;
+    return restored;
   }
 
   /** Fire one nitro charge. Returns false if there is none left or one is already burning. */
