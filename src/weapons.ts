@@ -34,7 +34,7 @@ export class Weapons {
   readonly missiles: Missile[] = [];
   readonly mines: Mine[] = [];
   private readonly explosions: Explosion[] = [];
-  readonly stats = { missilesFired: 0, missileCarHits: 0, missileWallHits: 0, minesLaid: 0, mineHits: 0, bulletsFired: 0, bulletHits: 0 };
+  readonly stats = { missilesFired: 0, rearMissilesFired: 0, missileCarHits: 0, missileWallHits: 0, minesLaid: 0, mineHits: 0, bulletsFired: 0, bulletHits: 0 };
   private time = 0;
   private readonly bullets: Bullet[] = [];
   private readonly sparks: Spark[] = [];
@@ -84,12 +84,16 @@ export class Weapons {
     this.tracers.count = 0;
   }
 
-  fireMissile(car: Car): boolean {
-    if (car.wrecked || car.ammo.missiles <= 0) return false;
-    car.ammo.missiles--;
+  /** Launch a missile out of the nose, or (rear = true) out of the tail, flying backwards along the car's heading. */
+  fireMissile(car: Car, rear = false): boolean {
+    const type = rear ? 'rearMissiles' : 'missiles';
+    if (car.wrecked || car.ammo[type] <= 0) return false;
+    car.ammo[type]--;
     this.stats.missilesFired++;
-    const fx = Math.sin(car.heading);
-    const fz = Math.cos(car.heading);
+    if (rear) this.stats.rearMissilesFired++;
+    const heading = car.heading + (rear ? Math.PI : 0);
+    const fx = Math.sin(heading);
+    const fz = Math.cos(heading);
     const mesh = new THREE.Group();
     const body = new THREE.Mesh(this.missileBodyGeo, this.missileMat);
     const nose = new THREE.Mesh(this.missileNoseGeo, this.noseMat);
@@ -104,7 +108,7 @@ export class Weapons {
     mesh.castShadow = true;
     this.scene.add(mesh);
     const missile: Missile = {
-      owner: car, x: car.x + fx * 2.5, z: car.z + fz * 2.5, y: car.y + 0.7, heading: car.heading, age: 0, index: car.trackIndex, mesh,
+      owner: car, x: car.x + fx * 2.5, z: car.z + fz * 2.5, y: car.y + 0.7, heading, age: 0, index: car.trackIndex, mesh,
     };
     this.missiles.push(missile);
     this.syncMissile(missile);

@@ -26,10 +26,10 @@ const LAND_SKID_SPEED = 6;
 const LAND_SKID_FULL = 20;
 const LAND_SKID_TIME = 0.4;
 const WRECK_DECEL = 3; // 1/s, how fast a destroyed car's leftover motion dies away
-export const START_LOADOUT = { missiles: 5, mines: 5, nitro: 3, bullets: 100 };
+export const START_LOADOUT = { missiles: 5, mines: 5, nitro: 3, bullets: 100, rearMissiles: 3 };
 export type AmmoType = keyof typeof START_LOADOUT;
 /** Most a car can carry of each; pickups top up to this. */
-export const AMMO_MAX: Record<AmmoType, number> = { missiles: 10, mines: 10, nitro: 5, bullets: 200 };
+export const AMMO_MAX: Record<AmmoType, number> = { missiles: 10, mines: 10, nitro: 5, bullets: 200, rearMissiles: 6 };
 const STEER_RAMP = 6; // steering input slew (1/s), so a tap is a gentle turn and a hold is a sharp one
 const MAX_STEER_ANGLE = 0.42; // front wheel lock (rad)
 

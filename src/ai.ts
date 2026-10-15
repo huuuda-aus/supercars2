@@ -17,15 +17,16 @@ export interface AiLevel {
   pitSkill: number; // 0..1, aim and timing accuracy of a PIT
   missile: number; // missile shots per second while a target is lined up (0 = never)
   mine: number; // mine drops per second while a car is right behind
+  rearMissile: number; // rear missile shots per second while a car is lined up behind (0 = never)
   nitro: number; // nitro bursts per second on a clear straight
   gun: number; // machine-gun bursts started per second while a car is dead ahead (0 = never)
   pickup: number; // 0..1, how far off its line it will go for a crate it wants
 }
 
 export const LEVELS: AiLevel[] = [
-  { name: 'Rookie', corner: 0.3, wander: 3.0, steerNoise: 0.5, mistakesPerSec: 0.15, racingLine: 0, pit: 0, pitSkill: 0, missile: 0.15, mine: 0.1, nitro: 0.05, gun: 0.3, pickup: 0.3 },
-  { name: 'Pro', corner: 0.65, wander: 1.8, steerNoise: 0.3, mistakesPerSec: 0.06, racingLine: 0.5, pit: 0.4, pitSkill: 0.5, missile: 0.6, mine: 0.4, nitro: 0.2, gun: 0.8, pickup: 0.7 },
-  { name: 'Elite', corner: 0.95, wander: 0.8, steerNoise: 0.12, mistakesPerSec: 0.02, racingLine: 1, pit: 1.2, pitSkill: 0.9, missile: 1.5, mine: 1.0, nitro: 0.5, gun: 2, pickup: 1 },
+  { name: 'Rookie', corner: 0.3, wander: 3.0, steerNoise: 0.5, mistakesPerSec: 0.15, racingLine: 0, pit: 0, pitSkill: 0, missile: 0.15, mine: 0.1, rearMissile: 0.1, nitro: 0.05, gun: 0.3, pickup: 0.3 },
+  { name: 'Pro', corner: 0.65, wander: 1.8, steerNoise: 0.3, mistakesPerSec: 0.06, racingLine: 0.5, pit: 0.4, pitSkill: 0.5, missile: 0.6, mine: 0.4, rearMissile: 0.5, nitro: 0.2, gun: 0.8, pickup: 0.7 },
+  { name: 'Elite', corner: 0.95, wander: 0.8, steerNoise: 0.12, mistakesPerSec: 0.02, racingLine: 1, pit: 1.2, pitSkill: 0.9, missile: 1.5, mine: 1.0, rearMissile: 1.2, nitro: 0.5, gun: 2, pickup: 1 },
 ];
 
 /**
@@ -39,6 +40,7 @@ export class AiDriver implements Controls {
   handbrake = 0; // AI drivers never use it
   // Weapon requests for this tick; the game loop acts on them.
   fireMissile = false;
+  fireRearMissile = false;
   dropMine = false;
   useNitro = false;
   fireGun = false; // true on every tick of a burst
@@ -62,6 +64,7 @@ export class AiDriver implements Controls {
   private pitCooldown = 4;
   private missileCooldown = 3;
   private mineCooldown = 3;
+  private rearCooldown = 4;
   private nitroCooldown = 4;
   private gunBurst = 0; // seconds of firing left in the current burst
   private gunCooldown = 2;
@@ -87,7 +90,7 @@ export class AiDriver implements Controls {
     const n = track.sampleCount;
     const speed = Math.max(car.vf, 0);
     this.t += dt;
-    this.fireMissile = this.dropMine = this.useNitro = this.fireGun = false;
+    this.fireMissile = this.fireRearMissile = this.dropMine = this.useNitro = this.fireGun = false;
 
     // A hard knock costs the driver a moment of control, longer for less skilled drivers.
     const impact = car.lastImpact;
@@ -181,6 +184,7 @@ export class AiDriver implements Controls {
     const { car, track, level } = this;
     this.missileCooldown -= dt;
     this.mineCooldown -= dt;
+    this.rearCooldown -= dt;
     this.nitroCooldown -= dt;
     this.gunCooldown -= dt;
     this.gunBurst -= dt;
@@ -206,6 +210,12 @@ export class AiDriver implements Controls {
       if (this.gunBurst <= 0 && this.gunCooldown <= 0 && car.ammo.bullets > 0 && g > 5 && g < 40 && Math.abs(s) < 1.6 && Math.random() < level.gun * dt) {
         this.gunBurst = 0.5 + Math.random() * 0.6;
         this.gunCooldown = 2.5;
+      }
+      // A car tailgating us gets a missile up the tail pipe if it is lined up; otherwise maybe a mine.
+      if (this.rearCooldown <= 0 && car.ammo.rearMissiles > 0 && g < -6 && g > -40 && Math.abs(s) < 2.2 && Math.random() < level.rearMissile * dt) {
+        this.fireRearMissile = true;
+        this.rearCooldown = 4;
+        this.mineCooldown = Math.max(this.mineCooldown, 1.5); // not a mine on top of it in the same instant
       }
       if (this.mineCooldown <= 0 && car.ammo.mines > 0 && g < -5 && g > -30 && Math.abs(s) < 3 && Math.random() < level.mine * dt) {
         this.dropMine = true;

@@ -2,23 +2,24 @@ import * as THREE from 'three';
 import type { Car } from './car';
 import type { Track } from './track';
 
-export type PickupKind = 'ammo' | 'nitro' | 'repair' | 'gun';
+export type PickupKind = 'ammo' | 'nitro' | 'repair' | 'gun' | 'rear';
 
 const SPOT_COUNT = 20;
 const SPOT_LANES = [4.5, -4.5, 0, 4, -4, 1.5, -1.5]; // metres from the centreline, cycled along the lap
 const RESPAWN_TIME = 20; // seconds after being taken
 const COLLECT_RADIUS = 1.9;
 const COLLECT_HEIGHT = 1.8;
-const KIND_WEIGHTS: [PickupKind, number][] = [['ammo', 0.3], ['nitro', 0.25], ['repair', 0.25], ['gun', 0.2]];
+const KIND_WEIGHTS: [PickupKind, number][] = [['ammo', 0.25], ['nitro', 0.2], ['repair', 0.2], ['gun', 0.2], ['rear', 0.15]];
 
 /** What each kind gives. */
 const AMMO_GIFT = { missiles: 3, mines: 3 };
 const NITRO_GIFT = 1;
 const REPAIR_GIFT = 35;
 const GUN_GIFT = 60;
+const REAR_GIFT = 3;
 
 /** Map-marker colours for the minimap. */
-export const PICKUP_COLOURS: Record<PickupKind, string> = { ammo: '#e0c030', nitro: '#3f9bff', repair: '#ffffff', gun: '#ff8a30' };
+export const PICKUP_COLOURS: Record<PickupKind, string> = { ammo: '#e0c030', nitro: '#3f9bff', repair: '#ffffff', gun: '#ff8a30', rear: '#ff4a4a' };
 
 export interface PickupSpot {
   readonly x: number;
@@ -37,6 +38,7 @@ export function canUse(car: Car, kind: PickupKind): boolean {
   if (kind === 'ammo') return car.ammoRoom('missiles') > 0 || car.ammoRoom('mines') > 0;
   if (kind === 'nitro') return car.ammoRoom('nitro') > 0;
   if (kind === 'gun') return car.ammoRoom('bullets') > 0;
+  if (kind === 'rear') return car.ammoRoom('rearMissiles') > 0;
   return car.health < 100;
 }
 
@@ -46,6 +48,7 @@ export function worthChasing(car: Car, kind: PickupKind): boolean {
   if (kind === 'ammo') return car.ammoRoom('missiles') >= 2 || car.ammoRoom('mines') >= 2;
   if (kind === 'repair') return car.health < 80;
   if (kind === 'gun') return car.ammoRoom('bullets') >= 40;
+  if (kind === 'rear') return car.ammoRoom('rearMissiles') >= 2;
   return true;
 }
 
@@ -59,6 +62,9 @@ function apply(car: Car, kind: PickupKind): string | null {
     if (n) parts.push(`+${n} mine${n > 1 ? 's' : ''}`);
   } else if (kind === 'nitro') {
     if (car.give('nitro', NITRO_GIFT)) parts.push('+1 nitro');
+  } else if (kind === 'rear') {
+    const r = car.give('rearMissiles', REAR_GIFT);
+    if (r) parts.push(`+${r} rear missile${r > 1 ? 's' : ''}`);
   } else if (kind === 'gun') {
     const b = car.give('bullets', GUN_GIFT);
     if (b) parts.push(`+${b} bullets`);
@@ -130,6 +136,7 @@ export class Pickups {
         nitro: shared.nitro(),
         repair: shared.repair(),
         gun: shared.gun(),
+        rear: shared.rear(),
       };
       for (const m of Object.values(models)) holder.add(m);
       const pad = shared.pad();
@@ -220,6 +227,9 @@ export class Pickups {
     const brassGeo = new THREE.CylinderGeometry(0.07, 0.07, 0.3, 6);
     const darkMat = std(0x34373d, { metalness: 0.5 });
     const brassMat = std(0xd9a53a, { metalness: 0.7 });
+    const rearPodGeo = box(1.0, 0.45, 0.8);
+    const rocketGeo = new THREE.ConeGeometry(0.15, 0.55, 8).rotateX(-Math.PI / 2);
+    const redMat2 = std(0xd83a3a);
     const gunBoxGeo = box(1.0, 0.5, 0.7);
     const padGeo = new THREE.CircleGeometry(1.15, 20).rotateX(-Math.PI / 2);
     const padColours: Record<PickupKind, THREE.MeshBasicMaterial> = {
@@ -227,6 +237,7 @@ export class Pickups {
       nitro: new THREE.MeshBasicMaterial({ color: 0x3f9bff, transparent: true, opacity: 0.35, depthWrite: false }),
       repair: new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.35, depthWrite: false }),
       gun: new THREE.MeshBasicMaterial({ color: 0xff8a30, transparent: true, opacity: 0.35, depthWrite: false }),
+      rear: new THREE.MeshBasicMaterial({ color: 0xff4a4a, transparent: true, opacity: 0.35, depthWrite: false }),
     };
     const mesh = (geo: THREE.BufferGeometry, mat: THREE.Material, y = 0) => {
       const m = new THREE.Mesh(geo, mat);
@@ -257,6 +268,17 @@ export class Pickups {
           const round = mesh(brassGeo, brassMat, 0.4);
           round.position.x = x;
           g.add(round);
+        }
+        return g;
+      },
+      // Grey launcher pod with two red rocket tips poking out of the back.
+      rear: () => {
+        const g = new THREE.Group();
+        g.add(mesh(rearPodGeo, steelMat));
+        for (const x of [-0.25, 0.25]) {
+          const rocket = mesh(rocketGeo, redMat2, 0.1);
+          rocket.position.set(x, 0.1, -0.55);
+          g.add(rocket);
         }
         return g;
       },

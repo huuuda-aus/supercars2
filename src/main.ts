@@ -224,9 +224,11 @@ function frame(now: number): void {
   // Weapon keys: Z = missile, X = mine, Shift or N = nitro. Read once per frame.
   const wantMissile = input.tapped('KeyZ');
   const wantMine = input.tapped('KeyX');
+  const wantRear = input.tapped('KeyB');
   const wantNitro = input.tapped('ShiftLeft') || input.tapped('ShiftRight') || input.tapped('KeyN');
   if (race.state === 'racing' && !car.finished) {
     if (wantMissile) weapons.fireMissile(car);
+    if (wantRear) weapons.fireMissile(car, true);
     if (wantMine) weapons.dropMine(car);
     if (wantNitro) car.useNitro();
   }
@@ -239,6 +241,7 @@ function frame(now: number): void {
       r.ai.update(STEP);
       if (race.state === 'racing' && !r.car.finished) {
         if (r.ai.fireMissile) weapons.fireMissile(r.car);
+        if (r.ai.fireRearMissile) weapons.fireMissile(r.car, true);
         if (r.ai.dropMine) weapons.dropMine(r.car);
         if (r.ai.useNitro) r.car.useNitro();
         if (r.ai.fireGun) weapons.fireGun(r.car);
@@ -267,8 +270,8 @@ function frame(now: number): void {
   hud.textContent =
     `P${place}/${allCars.length}   lap ${lap}/${race.totalLaps}   ${formatTime(race.time)}\n` +
     `${(car.speed * 3.6).toFixed(0)} km/h   height ${car.y.toFixed(1)}${car.airborne ? '  AIR' : ''}${car.drifting ? `  DRIFT ${Math.round(car.driftCombo)}` : ''}${car.offroad ? '  OFFROAD' : ''}${car.nitroActive ? '  NITRO' : ''}\n` +
-    `missiles ${car.ammo.missiles}   mines ${car.ammo.mines}   nitro ${car.ammo.nitro}   gun ${car.ammo.bullets}   drift pts ${Math.round(car.driftScore)}${pickupMsgTime > 0 ? `   ${pickupMsg}` : ''}\n` +
-    `arrows/WASD drive · Space handbrake · Z missile · hold F gun · X mine · Shift/N nitro · C camera · R restart · ${LEVELS[levelIndex].name} AI`;
+    `missiles ${car.ammo.missiles}   rear ${car.ammo.rearMissiles}   mines ${car.ammo.mines}   nitro ${car.ammo.nitro}   gun ${car.ammo.bullets}   drift pts ${Math.round(car.driftScore)}${pickupMsgTime > 0 ? `   ${pickupMsg}` : ''}\n` +
+    `arrows/WASD drive · Space handbrake · Z missile · B rear missile · hold F gun · X mine · Shift/N nitro · C camera · R restart · ${LEVELS[levelIndex].name} AI`;
   updateHealthBar();
   banner.textContent = bannerText();
   requestAnimationFrame(frame);
