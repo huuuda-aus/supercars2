@@ -43,14 +43,14 @@ export function canUse(car: Car, kind: PickupKind): boolean {
   if (kind === 'rear') return car.ammoRoom('rearMissiles') > 0;
   if (kind === 'oil') return car.ammoRoom('oil') > 0;
   if (kind === 'shield') return car.shieldTimer < 4;
-  return car.health < 100;
+  return car.health < car.stats.maxHealth;
 }
 
 /** Is it worth a detour? Used by the AI so it does not chase a crate it barely benefits from. */
 export function worthChasing(car: Car, kind: PickupKind): boolean {
   if (!canUse(car, kind)) return false;
   if (kind === 'ammo') return car.ammoRoom('missiles') >= 2 || car.ammoRoom('mines') >= 2;
-  if (kind === 'repair') return car.health < 80;
+  if (kind === 'repair') return car.health < car.stats.maxHealth * 0.8;
   if (kind === 'gun') return car.ammoRoom('bullets') >= 40;
   if (kind === 'rear') return car.ammoRoom('rearMissiles') >= 2;
   if (kind === 'oil') return car.ammoRoom('oil') >= 2;

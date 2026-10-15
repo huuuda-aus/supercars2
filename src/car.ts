@@ -34,8 +34,11 @@ export const AMMO_MAX: Record<AmmoType, number> = { missiles: 10, mines: 10, nit
 const STEER_RAMP = 6; // steering input slew (1/s), so a tap is a gentle turn and a hold is a sharp one
 const MAX_STEER_ANGLE = 0.42; // front wheel lock (rad)
 
-/** Extra speed scrub while rotating: speed lost per second = TURN_DECEL * yawRate * speed. */
-export const TURN_DECEL = 0.6;
+/**
+ * Extra speed scrub while rotating: speed lost per second = TURN_DECEL * yawRate * speed. Kept small: a corner should
+ * cost speed because the tyres are working hard (steered front wheels drag, sliding costs speed), not by decree.
+ */
+export const TURN_DECEL = 0.1;
 
 // Tyre model: each axle gives a lateral force that saturates at its grip limit.
 export const AXLE_GRIP = 20; // peak lateral acceleration per axle (m/s^2) -> 40 for the whole car
@@ -43,25 +46,43 @@ const TIRE_STIFFNESS = 200; // lateral force per radian of slip, before saturati
 /** Past this slip angle a tyre is sliding and its grip falls off (up to SLIDE_LOSS) -> spins can build. */
 const SLIDE_START = 0.2;
 const SLIDE_FULL = 0.6;
-const SLIDE_LOSS = 0.55;
-/** All-wheel drive: power and braking are shared 50/50, so each axle only loses this much grip at full load. */
-const DRIVE_GRIP_LOSS = 0.08;
+const SLIDE_LOSS = 0.3;
+/**
+ * All-wheel drive with a rear bias: of the engine force the rear axle takes this share, the front the rest. Braking is
+ * the other way round (the front does most of it). Each axle's longitudinal force eats into its grip (a friction
+ * circle), so hard throttle in a bend takes lateral grip off the rear (power oversteer) and hard braking takes it off
+ * the front (it ploughs on).
+ */
+const DRIVE_REAR_SHARE = 0.8;
+const BRAKE_FRONT_SHARE = 0.78;
+const CIRCLE_FLOOR = 0.35; // an axle never loses more than this much of its lateral grip to the friction circle
+/** Weight transfer: accelerating loads the rear and lightens the front, braking and lifting do the opposite. */
+const LOAD_TRANSFER = 0.3; // grip change per (longitudinal accel / ACCEL) while accelerating
+const LOAD_TRANSFER_BRAKING = 0.2; // ... while braking and lifting (weight shifts less than the brakes' raw force suggests)
+/** Pedal response (1/s): the car does not snap between full power and none, but a tap is still a quick blip. */
+const THROTTLE_RISE = 5;
+const THROTTLE_FALL = 7;
+const BRAKE_RISE = 9;
+const BRAKE_FALL = 12;
 /** Rear grip lost while the tail is knocked loose (see collision.ts). */
 const BREAKAWAY_GRIP_LOSS = 0.7;
-const YAW_DAMPING = 0.8; // 1/s
-const REAR_GRIP_BIAS = 1.15; // rear axle grips a bit more than the front, so the car understeers before it spins
-/** Steering lock shrinks with speed so the front axle stays near its grip peak: lock <= base + L*a/u^2. */
-const LOCK_BASE = 0.07;
-const LOCK_SPEED_TERM = 90;
+const YAW_DAMPING = 0.5; // 1/s
+const REAR_GRIP_BIAS = 0.88; // rear axle grips a bit more than the front, so the car understeers before it spins
+/**
+ * Steering lock shrinks with speed (lock <= base + L*a/u^2). Set generously, so at speed full lock overloads the front
+ * tyres: it ploughs on (understeer) instead of the car taking any input cleanly.
+ */
+const LOCK_BASE = 0.12;
+const LOCK_SPEED_TERM = 120;
 
 /** Handbrake: locks the rear wheels. The rear axle loses most of its grip (so the tail swings out) and slows the car. */
-const HANDBRAKE_GRIP_LOSS = 0.6;
+const HANDBRAKE_GRIP_LOSS = 0.5;
 const HANDBRAKE_DECEL = 3; // m/s^2 of rear-wheel braking at full pull
 const HANDBRAKE_RAMP = 10; // 1/s, how fast the pull builds and releases
 /** A slide counts as a drift past this body slip angle (rad) and speed (m/s). */
 /** Past this slip angle the car is turned too far sideways to hold a drift: extra yaw damping (1/s per rad over) pulls it back. */
 const DRIFT_STABILIZE_FROM = 0.5;
-const DRIFT_STABILIZE = 5;
+const DRIFT_STABILIZE = 10;
 const DRIFT_ANGLE = 0.3;
 const DRIFT_MIN_SPEED = 9;
 const DRIFT_GRACE = 0.6; // seconds a drift may be interrupted before the combo is banked
@@ -72,24 +93,63 @@ const OIL_TRACTION = 0.45;
 
 const SHIELD_MAX = 12; // seconds of shield a car can hold
 
+/**
+ * Traction and wheelspin. The driven wheels (all four) have their own speed; the tyres turn the difference between that
+ * and the road speed into drive force, up to what the tyres can hold. Ask for more than that (strong engine on poor
+ * tyres, a standing start, nitro, a wet or oily surface) and the wheels spin: the drive force drops to the sliding value
+ * and the tyres lose much of their cornering grip, so the tail steps out under steering. The limit rises with speed
+ * (the tyres are pressed on harder and the engine has less to give), so it is mostly a launch problem.
+ */
+const TRACTION = 15; // m/s^2 of drive force per unit of grip stat, from standstill
+const TRACTION_SPEED = 14; // m/s: the limit doubles by this speed
+const WHEEL_STIFFNESS = 10; // 1/s: drive force per m/s of wheel slip, until it hits the limit
+const WHEEL_LAG = 0.25; // wheel inertia relative to the car: light wheels race ahead the moment the tyres let go
+const SLIDING_DRIVE = 0.78; // drive force kept once spinning (sliding friction is lower than peak grip)
+const SPIN_LATERAL_LOSS = 0.5; // cornering grip lost at full wheelspin (the tail steps out)
+const SPIN_RANGE = 6; // m/s of slip beyond the point where the tyres let go that counts as full wheelspin
+const SPIN_ENGINE_FADE = 8; // m/s of such slip over which the engine's push dies away (a spinning engine hits its revs)
+
+/**
+ * High-speed looseness: the rear end gives up grip when the car is going fast AND steered hard, whatever the engine is
+ * doing. Flat out into a bend with the wheel hard over, the tail steps out unless the driver backs off or eases the
+ * steering, or the tyres are good enough (better tyres shrink the effect, see tyreFactor in drive()). It follows the
+ * driver's input, not the car's yaw, so it cannot feed on itself.
+ */
+const HS_SPEED_FROM = 12; // m/s where it starts
+const HS_SPEED_FULL = 25; // m/s where it is at full effect
+const HS_STEER_FROM = 0.45; // steering input (0..1) where it starts: throwing the car in hard
+const HS_STEER_RANGE = 0.55; // ... and the extra input until full effect
+const HS_LOSS = 0.22; // rear grip lost at full effect (stock tyres)
+
+/**
+ * Sliding sideways scrubs speed (rubber on tarmac): past this body slip angle the sideways velocity bleeds away at up
+ * to SLIDE_SCRUB (1/s). Without it a car could hold a 50 degree broadside slide at full speed indefinitely.
+ */
+const SLIDE_SCRUB_FROM = 0.25;
+const SLIDE_SCRUB_RANGE = 0.45;
+const SLIDE_SCRUB = 3;
+
+/** Hands off the wheel in a slide: the car straightens itself with this yaw acceleration (rad/s^2 per rad of body slip). */
+const DRIFT_CATCH = 9;
+const DRIFT_CATCH_DAMP = 3; // 1/s of extra yaw damping while it does so, so it does not swing back past straight
+
 const WHEEL_SIGNS: [number, number][] = [[1, 1], [-1, 1], [1, -1], [-1, -1]]; // FL, FR, RL, RR (x sign, z sign)
 
-/** Per-car multipliers on the base handling constants. The player's car is all 1. */
+/**
+ * Per-car multipliers on the base handling constants (about 1 is a good car), plus hit points. Where they come from
+ * (stock car, upgrades, AI class) is upgrades.ts.
+ */
 export interface CarStats {
   accel: number;
   brake: number;
   maxSpeed: number;
   grip: number;
   steer: number;
+  maxHealth: number; // hit points when repaired
+  nitro: number; // how hard a nitro charge kicks (scales its speed and acceleration bonus)
 }
 
-export const BASE_STATS: CarStats = { accel: 1, brake: 1, maxSpeed: 1, grip: 1, steer: 1 };
-
-/** Handling attributes vary by up to +-10% around the player's car. Top speed is identical for every car. */
-export function randomStats(spread = 0.1): CarStats {
-  const r = () => 1 + (Math.random() * 2 - 1) * spread;
-  return { accel: r(), brake: r(), maxSpeed: 1, grip: r(), steer: r() };
-}
+export const BASE_STATS: CarStats = { accel: 1, brake: 1, maxSpeed: 1, grip: 1, steer: 1, maxHealth: 100, nitro: 1 };
 
 /**
  * A brick on four wheels: planar rigid body (position, heading, forward/lateral velocity, yaw rate)
@@ -119,7 +179,7 @@ export class Car {
 
   // Weapons, damage and nitro.
   ammo = { ...START_LOADOUT };
-  health = 100;
+  health: number;
   wrecked = false; // destroyed for good: stays on the track as a smoking hulk until the race is reset
   justWrecked = false; // set when destroyed; the weapons system turns it into an explosion
   nitroTimer = 0;
@@ -129,6 +189,10 @@ export class Car {
 
   private steerState = 0;
   private handbrakeState = 0;
+  private throttleState = 0;
+  private wheelSpeed = 0; // m/s at the tyre contact patch; above the road speed means spinning
+  private spinAmount = 0;
+  private brakeState = 0;
   private driftGap = 0; // time since the last drifting step
   drifting = false;
   shieldTimer = 0; // while above zero the car takes no damage (pushes and blasts still move it)
@@ -149,6 +213,7 @@ export class Car {
     public stats: CarStats = BASE_STATS,
     style: CarStyle = 'coupe',
   ) {
+    this.health = stats.maxHealth;
     const model = buildCarModel(color, style);
     this.mesh = model.group;
     this.frontPivots = model.frontPivots;
@@ -186,6 +251,9 @@ export class Car {
     this.breakaway = 0;
     this.steerState = 0;
     this.handbrakeState = 0;
+    this.throttleState = this.brakeState = 0;
+    this.wheelSpeed = 0;
+    this.spinAmount = 0;
     this.landSkid = 0;
     this.oilTimer = 0;
     this.drifting = false;
@@ -198,7 +266,7 @@ export class Car {
 
   resetLoadout(): void {
     this.ammo = { ...START_LOADOUT };
-    this.health = 100;
+    this.health = this.stats.maxHealth;
     this.wrecked = false;
     this.justWrecked = false;
     this.nitroTimer = 0;
@@ -227,6 +295,9 @@ export class Car {
     this.vf = this.vl = this.vy = this.omega = 0;
     this.steerState = 0;
     this.handbrakeState = 0;
+    this.throttleState = this.brakeState = 0;
+    this.wheelSpeed = 0;
+    this.spinAmount = 0;
     this.landSkid = 0;
     this.oilTimer = 0;
     this.breakaway = 0;
@@ -247,10 +318,10 @@ export class Car {
     return taken;
   }
 
-  /** Restore health (never past 100, never for a wreck). Returns how much was restored. */
+  /** Restore health (never past the car's maximum, never for a wreck). Returns how much was restored. */
   repair(amount: number): number {
     if (this.wrecked) return 0;
-    const restored = Math.max(0, Math.min(amount, 100 - this.health));
+    const restored = Math.max(0, Math.min(amount, this.stats.maxHealth - this.health));
     this.health += restored;
     return restored;
   }
@@ -273,6 +344,9 @@ export class Car {
 
   /** 0..1, how far the handbrake is pulled. */
   get handbrakePull(): number { return this.handbrakeState; }
+
+  /** 0..1: how hard the driven wheels are spinning (a burnout), 0 while they grip. For the skid marks. */
+  get burnout(): number { return this.spinAmount; }
 
   get nitroActive(): boolean { return this.nitroTimer > 0; }
 
@@ -312,7 +386,7 @@ export class Car {
     this.damage(damage * (0.25 + 0.75 * falloff));
   }
 
-  get topSpeed(): number { return MAX_SPEED * this.stats.maxSpeed * (this.nitroTimer > 0 ? NITRO_SPEED : 1); }
+  get topSpeed(): number { return MAX_SPEED * this.stats.maxSpeed * (this.nitroTimer > 0 ? 1 + (NITRO_SPEED - 1) * this.stats.nitro : 1); }
 
   get speed(): number { return Math.hypot(this.vf, this.vl); }
 
@@ -457,6 +531,31 @@ export class Car {
     }
   }
 
+  /**
+   * Drive force that actually reaches the road. Advances the wheel speed: the engine pushes the wheels, the tyres push
+   * back (and so push the car), and when the engine asks for more than the tyres hold the wheels run away.
+   */
+  private driveForce(engine: number, u: number, surface: number, dt: number): number {
+    const road = Math.max(u, 0);
+    if (engine <= 0.01) {
+      // No power: the wheels simply roll with the road again.
+      this.wheelSpeed += (road - this.wheelSpeed) * Math.min(1, 14 * dt);
+      this.spinAmount = 0;
+      return 0;
+    }
+    const limit = TRACTION * this.stats.grip * surface * (1 + road / TRACTION_SPEED);
+    const slip = this.wheelSpeed - road;
+    const raw = WHEEL_STIFFNESS * slip;
+    const spinning = raw > limit;
+    // Gripping: the tyres deliver what the slip asks for. Past the limit they let go and deliver less.
+    const force = spinning ? limit * SLIDING_DRIVE : Math.max(-limit, raw);
+    const over = spinning ? slip - limit / WHEEL_STIFFNESS : 0;
+    this.spinAmount = Math.min(1, over / SPIN_RANGE);
+    const fade = spinning ? Math.max(0.2, 1 - over / SPIN_ENGINE_FADE) : 1;
+    this.wheelSpeed = Math.max(0, this.wheelSpeed + (((engine * fade * (1 + WHEEL_LAG)) - force) / WHEEL_LAG) * dt);
+    return force;
+  }
+
   /** A destroyed car just skids to a halt. */
   private slideToStop(dt: number): void {
     const k = Math.exp(-WRECK_DECEL * dt);
@@ -480,20 +579,29 @@ export class Car {
     const v = this.vl;
     const w = this.omega;
 
+    // Pedals ramp toward the keys, so a tap is a quick blip and lifting off fades the power instead of cutting it.
+    const slew = (state: number, target: number, rise: number, fall: number) =>
+      state + Math.sign(target - state) * Math.min(Math.abs(target - state), (target > state ? rise : fall) * dt);
+    this.throttleState = slew(this.throttleState, input.throttle, THROTTLE_RISE, THROTTLE_FALL);
+    this.brakeState = slew(this.brakeState, input.brake, BRAKE_RISE, BRAKE_FALL);
+
     // Longitudinal acceleration.
     const maxSpeed = this.topSpeed * (this.offroad ? OFFROAD_MAX : 1);
     let ax = 0;
-    const boost = this.nitroTimer > 0 ? NITRO_ACCEL : 1;
-    if (input.throttle && u < maxSpeed) ax += ACCEL * st.accel * boost;
-    if (input.brake) ax -= u > 0.5 ? BRAKE * st.brake : u > -REVERSE_MAX ? ACCEL * st.accel * 0.6 : 0;
-    if (!input.throttle && !input.brake) {
+    const boost = this.nitroTimer > 0 ? 1 + (NITRO_ACCEL - 1) * st.nitro : 1;
+    const engine = u < maxSpeed && u > -1 ? ACCEL * st.accel * boost * this.throttleState : 0;
+    const surface = (this.offroad ? OFFROAD_GRIP : 1) * (this.oilTimer > 0 ? OIL_GRIP : 1);
+    ax += this.driveForce(engine, u, surface, dt);
+    if (this.brakeState > 0) ax -= (u > 0.5 ? BRAKE * st.brake : u > -REVERSE_MAX ? ACCEL * st.accel * 0.6 : 0) * this.brakeState;
+    const pedal = Math.max(this.throttleState, this.brakeState);
+    if (pedal < 1) {
       const coast = COAST_DECEL + COAST_DRAG * Math.abs(u);
-      ax -= Math.abs(u) <= coast * dt ? u / dt : Math.sign(u) * coast;
+      ax -= (Math.abs(u) <= coast * dt ? u / dt : Math.sign(u) * coast) * (1 - pedal);
     }
     if (u > maxSpeed) ax -= (u - maxSpeed) * 2;
     ax -= u * DRAG;
     const oiled = this.oilTimer > 0;
-    if (oiled) ax *= OIL_TRACTION; // wheels spin or lock instead of gripping
+    if (oiled && ax < 0) ax *= OIL_TRACTION; // brakes lock instead of gripping (driving wheels just spin, see driveForce)
 
     // Steering: ramp toward the input, then convert to a front wheel angle.
     const dSteer = input.steer - this.steerState;
@@ -501,29 +609,50 @@ export class Car {
     const lock = Math.min(MAX_STEER_ANGLE, LOCK_BASE + LOCK_SPEED_TERM / Math.max(u * u, 1));
     const delta = this.steerState * lock * st.steer;
 
-    // AWD: the drive/brake force is split evenly; both axles lose a little grip under load.
-    const load = Math.min(1, Math.abs(ax) / ACCEL);
-    const grip = AXLE_GRIP * st.grip * (this.offroad ? OFFROAD_GRIP : 1) * (1 - DRIVE_GRIP_LOSS * load) * (oiled ? OIL_GRIP : 1);
-    const fFront = tyreForce(u, v + WHEEL_Z * w, delta, grip);
+    // Split the longitudinal force between the axles and shift weight with it.
+    const frontShare = ax > 0 ? 1 - DRIVE_REAR_SHARE : BRAKE_FRONT_SHARE;
+    const axFront = ax * frontShare; // force of the front axle, along the wheels
     this.breakaway = Math.max(0, this.breakaway - dt);
     const looseness = 1 - BREAKAWAY_GRIP_LOSS * Math.min(1, this.breakaway / 0.4);
     const pull = Math.sign(input.handbrake - this.handbrakeState) * Math.min(Math.abs(input.handbrake - this.handbrakeState), HANDBRAKE_RAMP * dt);
     this.handbrakeState += pull;
     const hbGrip = 1 - HANDBRAKE_GRIP_LOSS * this.handbrakeState;
-    const fRear = tyreForce(u, v - WHEEL_Z * w, 0, grip * REAR_GRIP_BIAS * looseness * hbGrip);
-    const axFront = ax / 2; // drive force of the front axle, along the wheels
-    const fxFront = axFront * Math.cos(delta) - fFront * Math.sin(delta);
-    const fyFront = axFront * Math.sin(delta) + fFront * Math.cos(delta);
     // Locked rear wheels deliver no drive; they brake instead.
     const hbBrake = Math.min(HANDBRAKE_DECEL * this.handbrakeState, Math.abs(u) / dt) * Math.sign(u);
-    const fxRear = ax / 2 * (1 - this.handbrakeState) - hbBrake;
+    const fxRear = (ax - axFront) * (1 - this.handbrakeState) - hbBrake;
+
+    const transfer = Math.max(-1.5, Math.min(1.5, ax / ACCEL)) * (ax > 0 ? LOAD_TRANSFER : LOAD_TRANSFER_BRAKING);
+    // Spinning wheels have little left for cornering: steer while burning rubber and the tail swings out.
+    const spin = this.spinAmount;
+    const base = AXLE_GRIP * st.grip * (this.offroad ? OFFROAD_GRIP : 1) * (oiled ? OIL_GRIP : 1) * (1 - SPIN_LATERAL_LOSS * spin);
+    const gripFront = base * (1 - transfer);
+    const clamp01 = (x: number) => Math.min(1, Math.max(0, x));
+    const tyreFactor = Math.min(1, Math.max(0.1, 1 - (st.grip - 0.7) * 2.1)); // stock tyres 1, the best tyres 0.1
+    const looseAtSpeed =
+      1 - HS_LOSS * tyreFactor * clamp01((u - HS_SPEED_FROM) / (HS_SPEED_FULL - HS_SPEED_FROM)) * clamp01((Math.abs(this.steerState) - HS_STEER_FROM) / HS_STEER_RANGE);
+    const gripRear = base * REAR_GRIP_BIAS * (1 + transfer) * looseness * hbGrip * looseAtSpeed;
+    // Friction circle: what the axle spends pushing or braking is not left over for cornering.
+    const circle = (fx: number, g: number) => Math.max(CIRCLE_FLOOR, Math.sqrt(Math.max(0, 1 - (fx / g) ** 2)));
+    const fFront = tyreForce(u, v + WHEEL_Z * w, delta, gripFront * circle(axFront, gripFront));
+    const fRear = tyreForce(u, v - WHEEL_Z * w, 0, gripRear * circle(fxRear, gripRear));
+    const fxFront = axFront * Math.cos(delta) - fFront * Math.sin(delta);
+    const fyFront = axFront * Math.sin(delta) + fFront * Math.cos(delta);
 
     this.vf = u + (fxRear + fxFront + v * w) * dt;
     this.vl = v + (fyFront + fRear - u * w) * dt;
     this.omega = w + ((WHEEL_Z * fyFront - WHEEL_Z * fRear) / INERTIA) * dt;
     this.omega *= Math.exp(-YAW_DAMPING * dt);
     const slip = Math.abs(Math.atan2(this.vl, Math.max(Math.abs(this.vf), 1)));
+    this.vl *= Math.exp(-SLIDE_SCRUB * Math.min(1, Math.max(0, (slip - SLIDE_SCRUB_FROM) / SLIDE_SCRUB_RANGE)) * dt);
     if (slip > DRIFT_STABILIZE_FROM) this.omega *= Math.exp(-DRIFT_STABILIZE * (slip - DRIFT_STABILIZE_FROM) * dt);
+    // Let go of the steering in a slide and the car straightens itself (a tap of the handbrake is then a flick, not a
+    // spin). Hold the wheel in or against the slide and you are in charge: no help.
+    if (this.handbrakeState < 0.3 && Math.abs(u) > 4) {
+      const hands = 1 - Math.min(1, Math.abs(this.steerState));
+      const slipAngle = Math.atan2(this.vl, Math.max(Math.abs(this.vf), 1));
+      this.omega += DRIFT_CATCH * slipAngle * hands * hands * dt;
+      this.omega *= Math.exp(-DRIFT_CATCH_DAMP * Math.min(1, Math.abs(slipAngle) * 2) * hands * hands * dt);
+    }
     this.vf *= Math.max(0, 1 - TURN_DECEL * Math.abs(this.omega) * dt);
   }
 

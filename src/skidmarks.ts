@@ -72,12 +72,15 @@ export class Skidmarks {
 
   /** Mark strength 0..1 for each wheel (FL, FR, RL, RR). */
   private intensities(car: Car): number[] {
-    if (car.wrecked || car.airborne || car.speed < SKID_MIN_SPEED) return [0, 0, 0, 0];
+    if (car.wrecked || car.airborne) return [0, 0, 0, 0];
+    // Burning rubber: all four driven wheels leave marks, even from a standstill.
+    const burn = car.burnout;
+    if (car.speed < SKID_MIN_SPEED) return [burn * 0.7, burn * 0.7, burn, burn];
     const slip = Math.abs(Math.atan2(car.vl, Math.max(Math.abs(car.vf), 1)));
     const drift = Math.min(1, Math.max(0, (slip - DRIFT_SLIP_FROM) / (DRIFT_SLIP_FULL - DRIFT_SLIP_FROM)));
     const lock = car.handbrakePull; // locked rear wheels smear even without any sideways slip
-    const rear = Math.max(drift, lock * 0.9);
-    const front = drift * 0.6;
+    const rear = Math.max(drift, lock * 0.9, burn);
+    const front = Math.max(drift * 0.6, burn * 0.7);
     // Touching down after a jump: all four tyres scrub for a moment.
     const land = car.landSkid > 0 ? car.landStrength * Math.min(1, car.landSkid / 0.15) : 0;
     return [Math.max(front, land), Math.max(front, land), Math.max(rear, land), Math.max(rear, land)];

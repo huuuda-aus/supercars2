@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { AiDriver, LEVELS } from './ai';
-import { Car, randomStats } from './car';
+import { Car } from './car';
 import { beginCollisionStep, collideCars } from './collision';
 import { Input, type Controls } from './input';
 import { Minimap } from './minimap';
@@ -9,6 +9,7 @@ import { formatTime, Race } from './race';
 import { applyGroundUVs, createTrees, makeGrassTexture } from './scenery';
 import { Skidmarks } from './skidmarks';
 import { Track } from './track';
+import { aiStats, RIVAL_CAR_TIER, starterStats } from './upgrades';
 import { Weapons } from './weapons';
 
 const STEP = 1 / 120; // fixed physics timestep, independent of display refresh rate
@@ -106,9 +107,10 @@ function resetRace(): void {
   skidmarks.clear();
   pickups.reset();
   pickupMsgTime = 0;
+  car.stats = starterStats();
   car.placeOnTrack(track, track.sampleCount - 6);
   for (const r of rivals) {
-    r.car.stats = randomStats();
+    r.car.stats = aiStats(RIVAL_CAR_TIER);
     r.car.placeOnTrack(track, track.sampleCount - r.grid, r.lane);
     r.ai = new AiDriver(r.car, track, r.lane, LEVELS[levelIndex], () => allCars, () => weapons.hazards, () => pickups.spots);
   }
@@ -159,13 +161,16 @@ const input = new Input();
 const hud = document.getElementById('hud')!;
 const minimap = new Minimap(track);
 const banner = document.getElementById('banner')!;
+const hpBar = document.getElementById('hpbar')!;
 const hpFill = document.getElementById('hpfill')!;
 const hpText = document.getElementById('hptext')!;
 
 function updateHealthBar(): void {
   const hp = Math.max(0, car.health);
-  hpFill.style.width = `${hp}%`;
-  hpFill.style.background = hp > 60 ? '#3fcf5a' : hp > 30 ? '#e6c230' : '#e03a2a';
+  const fraction = hp / car.stats.maxHealth;
+  hpBar.style.width = `${Math.min(240, 120 + car.stats.maxHealth * 0.8)}px`; // a tougher car gets a longer bar
+  hpFill.style.width = `${fraction * 100}%`;
+  hpFill.style.background = fraction > 0.6 ? '#3fcf5a' : fraction > 0.3 ? '#e6c230' : '#e03a2a';
   hpText.textContent = car.wrecked ? 'WRECKED' : `HP ${Math.ceil(hp)}`;
 }
 let acc = 0;

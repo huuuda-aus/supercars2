@@ -1,4 +1,4 @@
-import { ACCEL, DRAG, TURN_DECEL, type Car } from './car';
+import { ACCEL, AXLE_GRIP, DRAG, TURN_DECEL, type Car } from './car';
 import type { Controls } from './input';
 import { worthChasing, type PickupSpot } from './pickups';
 import type { Track } from './track';
@@ -35,7 +35,8 @@ export const LEVELS: AiLevel[] = [
 
 /**
  * Follows the track spline in its own lane, with human-ish imperfection scaled by AiLevel.
- * Level only affects driving skill; car performance comes from the car's own stats.
+ * Level only affects driving skill and how freely weapons are used; car performance comes from the car's own stats,
+ * which do not depend on the level (see RIVAL_CAR_TIER).
  */
 export class AiDriver implements Controls {
   throttle = 0;
@@ -193,7 +194,9 @@ export class AiDriver implements Controls {
       const c = angle / (look * horizon * track.spacing);
       if (c < 1e-4) continue;
       const v = (-DRAG + Math.sqrt(DRAG * DRAG + 4 * TURN_DECEL * c * budget)) / (2 * TURN_DECEL * c);
-      speedCap = Math.min(speedCap, v);
+      // ... and the highest speed the tyres can hold round it (a stock car with worn tyres has to slow down more).
+      const vGrip = Math.sqrt((2 * AXLE_GRIP * car.stats.grip * 0.7) / c);
+      speedCap = Math.min(speedCap, v, vGrip);
     }
     // Threading past wrecks: ease off a little so there is time to place the car.
     const wreckCap = wreckLane !== null && this.wreckAheadWithin(25) ? 16 : Infinity;

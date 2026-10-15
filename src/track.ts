@@ -90,7 +90,7 @@ const CROSSING_NO_WALLS = 30;
  * foot, steepening to the lip) so a long ramp is not absurdly tall: the slope falls off as
  * (1 - u/length)^p with u the distance from the lip, and p follows from the height.
  */
-const JUMP = { x: 0, z: 0, height: 8, length: 20, lipSlope: 1.35 };
+const JUMP = { x: 0, z: 0, height: 8, length: 20, lipSlope: 1.7 };
 
 export class Track {
   readonly halfWidth = 9;
