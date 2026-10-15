@@ -8,7 +8,7 @@ import { buildWreck, type Wreck } from './wreck';
 
 const GRAVITY = 78; // 30 originally, 90 after first tuning; now 20% of the way back
 export const ACCEL = 28;
-const BRAKE = 45;
+export const BRAKE = 45;
 const CLIFF_HEIGHT = 1.0; // arriving this far below the landing ramp's lip counts as hitting its face
 export const MAX_SPEED = 30;
 const REVERSE_MAX = 12;
@@ -25,6 +25,8 @@ const NITRO_ACCEL = 1.7; // acceleration multiplier while it burns
 const LAND_SKID_SPEED = 6;
 const LAND_SKID_FULL = 20;
 const LAND_SKID_TIME = 0.4;
+/** How much of its speed into a ramp face a crashed car keeps, as a rebound. */
+const FACE_REBOUND = 0.3;
 const WRECK_DECEL = 0.5; // 1/s, viscous part of how fast a destroyed car's leftover motion dies away
 const WRECK_FRICTION = 12; // m/s^2 of dry scraping: with the wreck mass this out-pulls a car's engine, so pushing slowly does nothing
 export const START_LOADOUT = { missiles: 5, mines: 5, nitro: 3, bullets: 100, rearMissiles: 3, oil: 3 };
@@ -133,6 +135,17 @@ const SLIDE_SCRUB = 3;
 const DRIFT_CATCH = 9;
 const DRIFT_CATCH_DAMP = 3; // 1/s of extra yaw damping while it does so, so it does not swing back past straight
 
+/**
+ * The engine's revs and gear are for the dials only. A five-speed box over the wheel speed: each gear runs out at this
+ * fraction of the car's top speed, and the revs climb from the shift-down point to the redline in each.
+ */
+const GEAR_TOP = [0.22, 0.42, 0.62, 0.82, 1.05];
+const REVS_AFTER_SHIFT = 0.5;
+const REVS_IDLE = 0.17;
+
+/** Dropping the clutch at the start: the revs the wheels are given per unit of throttle held (m/s of wheel speed). */
+const CLUTCH_DUMP = 9;
+
 const WHEEL_SIGNS: [number, number][] = [[1, 1], [-1, 1], [1, -1], [-1, -1]]; // FL, FR, RL, RR (x sign, z sign)
 
 /**
@@ -174,7 +187,9 @@ export class Car {
   finished = false;
   finishTime = 0;
   breakaway = 0; // seconds of reduced rear grip left after a sideways tap behind the centre of mass
-  respawns = 0; // times the car fell into the pit
+  respawns = 0; // times the car crashed by falling short of the jump
+  private roll = 0; // visual tumble of a wreck that is falling
+  private rollRate = 0;
   lastImpact = 0; // largest collision impulse since the AI last looked (used to stun AI drivers)
 
   // Weapons, damage and nitro.
@@ -192,9 +207,14 @@ export class Car {
   private throttleState = 0;
   private wheelSpeed = 0; // m/s at the tyre contact patch; above the road speed means spinning
   private spinAmount = 0;
+  rpm = 0; // engine speed as a fraction of the redline (a little over 1 on the limiter)
+  gear = 0; // 1..5, 0 in neutral, -1 in reverse (for the dials)
   private brakeState = 0;
   private driftGap = 0; // time since the last drifting step
   drifting = false;
+  /** Held on the start line: the pedals work and the engine revs, but the car does not move. */
+  held = false;
+  private wasHeld = false;
   shieldTimer = 0; // while above zero the car takes no damage (pushes and blasts still move it)
   oilTimer = 0; // seconds of slippery tyres left; refreshed by the weapons system while a wheel is on a slick
   landSkid = 0; // seconds of tyre scrub left after touching down hard (read by the skidmarks)
@@ -271,6 +291,7 @@ export class Car {
     this.justWrecked = false;
     this.nitroTimer = 0;
     this.shieldTimer = 0;
+    this.roll = this.rollRate = 0;
     this.showWreck(false);
   }
 
@@ -279,31 +300,28 @@ export class Car {
     this.wreck.group.visible = on;
   }
 
-  /** Put the car back on the road before the jump (after falling into the pit), keeping lap progress. */
-  respawn(track: Track): void {
-    this.respawns++;
-    this.respawnAt(track, track.respawnIndex);
+  /**
+   * The car is destroyed outright (a fall into the pit or onto the far ramp's face): it wrecks whatever its shield or
+   * health, and keeps its momentum, which then plays out as a skid, a tumble and bounces off the pit walls.
+   */
+  private crash(): void {
+    if (this.wrecked) return;
+    this.health = 0;
+    this.respawns++; // counts crashes of this kind
+    this.wreckNow();
+    this.rollRate = (Math.random() < 0.5 ? -1 : 1) * (2.5 + Math.random() * 2);
   }
 
-  private respawnAt(track: Track, index: number): void {
-    const s = track.samples[index];
-    this.x = s.p.x;
-    this.z = s.p.z;
-    this.y = s.p.y;
-    this.heading = Math.atan2(s.tangent.x, s.tangent.z);
-    this.trackIndex = index;
-    this.vf = this.vl = this.vy = this.omega = 0;
-    this.steerState = 0;
-    this.handbrakeState = 0;
-    this.throttleState = this.brakeState = 0;
-    this.wheelSpeed = 0;
-    this.spinAmount = 0;
-    this.landSkid = 0;
-    this.oilTimer = 0;
-    this.breakaway = 0;
-    this.lastImpact = 0;
-    this.airborne = false;
-    this.syncMesh();
+  /** The car hit the sheer face of a ramp: back out of it, give up the speed into the face and drop into the pit. */
+  private bounceOffFace(track: Track, index: number, prevX: number, prevZ: number): void {
+    this.x = prevX;
+    this.z = prevZ;
+    const t = track.samples[index].tangent;
+    const v = this.worldVelocity();
+    const along = v.x * t.x + v.z * t.z;
+    const change = -(1 + FACE_REBOUND) * along;
+    this.setWorldVelocity(v.x + change * t.x, v.z + change * t.z);
+    this.omega *= 0.5;
   }
 
   /** Space left in the magazine for this ammo type. */
@@ -345,6 +363,9 @@ export class Car {
   /** 0..1, how far the handbrake is pulled. */
   get handbrakePull(): number { return this.handbrakeState; }
 
+  /** The accelerator pedal position (0..1), for the engine sound. */
+  get pedal(): number { return this.throttleState; }
+
   /** 0..1: how hard the driven wheels are spinning (a burnout), 0 while they grip. For the skid marks. */
   get burnout(): number { return this.spinAmount; }
 
@@ -355,11 +376,15 @@ export class Car {
     this.health -= amount;
     if (this.health <= 0) {
       this.health = 0;
-      this.wrecked = true;
-      this.justWrecked = true;
-      this.nitroTimer = 0;
-      this.showWreck(true);
+      this.wreckNow();
     }
+  }
+
+  private wreckNow(): void {
+    this.wrecked = true;
+    this.justWrecked = true;
+    this.nitroTimer = 0;
+    this.showWreck(true);
   }
 
   /**
@@ -432,6 +457,8 @@ export class Car {
     this.shieldTimer = Math.max(0, this.shieldTimer - dt);
     this.oilTimer = Math.max(0, this.oilTimer - dt);
     if (this.wrecked) this.wreck.update(dt);
+    const prevX = this.x;
+    const prevZ = this.z;
 
     const q = track.query(this.x, this.z, this.trackIndex);
     this.offroad = Math.abs(q.lateral) > track.halfWidth;
@@ -448,8 +475,26 @@ export class Car {
     // world (the body-frame components would rotate with the car and bend the flight path), and any spin
     // carried off the lip dies away quickly instead of turning the car round.
     const airVelocity = this.airborne ? this.worldVelocity() : null;
-    if (this.airborne) this.omega *= Math.exp(-AIR_YAW_DAMPING * dt);
-    else if (this.wrecked) this.slideToStop(dt);
+    if (this.wasHeld && !this.held) {
+      // The lights go green with your foot down: the clutch drops with the engine already spinning the wheels.
+      this.wasHeld = false;
+      this.wheelSpeed = CLUTCH_DUMP * this.throttleState;
+    }
+    // Pedals ramp toward the keys, so a tap is a quick blip and lifting off fades the power instead of cutting it.
+    const slew = (state: number, target: number, rise: number, fall: number) =>
+      state + Math.sign(target - state) * Math.min(Math.abs(target - state), (target > state ? rise : fall) * dt);
+    this.throttleState = slew(this.throttleState, input.throttle, THROTTLE_RISE, THROTTLE_FALL);
+    this.brakeState = slew(this.brakeState, input.brake, BRAKE_RISE, BRAKE_FALL);
+    if (this.held) {
+      // On the start line: rev as much as you like, the car stays put.
+      this.vf = this.vl = this.omega = 0;
+      this.wheelSpeed = 0;
+      this.spinAmount = 0;
+      this.wasHeld = true;
+    } else if (this.airborne) {
+      this.omega *= Math.exp(-AIR_YAW_DAMPING * dt);
+      this.freeSpinWheels(dt);
+    } else if (this.wrecked) this.slideToStop(dt);
     else this.drive(dt, input);
 
     this.updateDrift(dt);
@@ -463,30 +508,26 @@ export class Car {
     collideWalls(this, track);
 
     // Vertical: free fall, snap to the ground, inherit the slope's vertical speed on contact.
-    const gq = track.query(this.x, this.z, this.trackIndex);
-    const ground = gq.gap ? track.pitFloor : gq.height;
-    if (!this.wrecked && !gq.gap && this.airborne && this.y < ground - CLIFF_HEIGHT) {
-      this.respawn(track); // arrived far below the landing ramp and hit its face
-      return;
+    let gq = track.query(this.x, this.z, this.trackIndex);
+    let ground = gq.gap ? track.pitFloor : gq.height;
+    if (!gq.gap && this.y < ground - CLIFF_HEIGHT) {
+      // Arrived far below the lip of a ramp: that is its sheer face. Crash against it and fall back into the pit.
+      this.crash();
+      this.bounceOffFace(track, gq.index, prevX, prevZ);
+      gq = track.query(this.x, this.z, this.trackIndex);
+      ground = gq.gap ? track.pitFloor : gq.height;
     }
     this.vy -= GRAVITY * dt;
     this.y += this.vy * dt;
     if (gq.gap && this.y <= track.pitFloor + 0.05) {
-      if (!this.wrecked) {
-        this.respawn(track); // dropped into the pit
-        return;
-      }
-      // A wreck stays where it fell.
+      this.crash(); // dropped into the pit (does nothing if it already has)
       this.y = track.pitFloor + 0.05;
-      this.vy = 0;
-      this.vf = this.vl = this.omega = 0;
-      this.airborne = false;
     }
     if (this.y <= ground) {
       this.y = ground;
       const t = track.samples[gq.index].tangent;
       const v = this.worldVelocity();
-      const roadVy = gq.slope * (v.x * t.x + v.z * t.z);
+      const roadVy = gq.gap ? 0 : gq.slope * (v.x * t.x + v.z * t.z);
       const impact = roadVy - this.vy; // how fast we came down onto the road
       if (this.airborne && !this.wrecked && impact > LAND_SKID_SPEED) {
         this.landSkid = LAND_SKID_TIME;
@@ -510,6 +551,15 @@ export class Car {
     }
     this.pitch += (targetPitch - this.pitch) * Math.min(1, dt * 12);
     this.wheelAngle += (this.vf * dt) / WHEEL_R;
+    this.updateRevs(dt);
+    // A wreck tumbles while it falls and settles flat once it lands.
+    if (this.wrecked && this.airborne) {
+      this.roll += this.rollRate * dt;
+    } else {
+      this.rollRate = 0;
+      const turns = this.roll - Math.PI * 2 * Math.round(this.roll / (Math.PI * 2));
+      this.roll = turns * Math.exp(-8 * dt);
+    }
 
     this.syncMesh();
   }
@@ -556,6 +606,39 @@ export class Car {
     return force;
   }
 
+  /**
+   * In the air nothing holds the wheels back: with the pedal down they spin up (the revs soar), with it up they ease
+   * back to road speed. On landing the tyres bite and driveForce pulls them back down to the road, so the revs fall.
+   */
+  private freeSpinWheels(dt: number): void {
+    const road = Math.max(this.vf, 0);
+    const top = MAX_SPEED * this.stats.maxSpeed;
+    const target = this.throttleState > 0.1 ? Math.min(top * 1.3, road + 14 * this.throttleState) : road;
+    const step = (target > this.wheelSpeed ? 24 : 10) * dt;
+    this.wheelSpeed += Math.max(-step, Math.min(step, target - this.wheelSpeed));
+    this.spinAmount = 0;
+  }
+
+  /** Engine revs and gear for the dials, from the wheel speed (so a burnout screams) and the throttle at a standstill. */
+  private updateRevs(dt: number): void {
+    if (this.wrecked) {
+      this.rpm = this.gear = 0;
+      return;
+    }
+    const top = MAX_SPEED * this.stats.maxSpeed;
+    const reversing = this.vf < -0.5;
+    const w = reversing ? -this.vf : this.wheelSpeed;
+    let g = 0;
+    while (g < GEAR_TOP.length - 1 && w > GEAR_TOP[g] * top) g++;
+    const low = g === 0 ? 0 : GEAR_TOP[g - 1] * top * 0.85;
+    const f = Math.max(0, Math.min(1.08, (w - low) / (GEAR_TOP[g] * top - low)));
+    let target = (g === 0 ? REVS_IDLE : REVS_AFTER_SHIFT) + (1 - (g === 0 ? REVS_IDLE : REVS_AFTER_SHIFT)) * f;
+    // Standing or crawling with the pedal down, the engine revs freely against the slipping clutch.
+    if (w < 2.5) target = Math.max(target, REVS_IDLE + 0.65 * this.throttleState);
+    this.rpm += (target - this.rpm) * Math.min(1, (target > this.rpm ? 12 : 6) * dt);
+    this.gear = reversing ? -1 : w < 0.5 && this.throttleState < 0.05 ? 0 : g + 1;
+  }
+
   /** A destroyed car just skids to a halt. */
   private slideToStop(dt: number): void {
     const k = Math.exp(-WRECK_DECEL * dt);
@@ -578,12 +661,6 @@ export class Car {
     const u = this.vf;
     const v = this.vl;
     const w = this.omega;
-
-    // Pedals ramp toward the keys, so a tap is a quick blip and lifting off fades the power instead of cutting it.
-    const slew = (state: number, target: number, rise: number, fall: number) =>
-      state + Math.sign(target - state) * Math.min(Math.abs(target - state), (target > state ? rise : fall) * dt);
-    this.throttleState = slew(this.throttleState, input.throttle, THROTTLE_RISE, THROTTLE_FALL);
-    this.brakeState = slew(this.brakeState, input.brake, BRAKE_RISE, BRAKE_FALL);
 
     // Longitudinal acceleration.
     const maxSpeed = this.topSpeed * (this.offroad ? OFFROAD_MAX : 1);
@@ -663,6 +740,7 @@ export class Car {
   syncMesh(): void {
     this.mesh.position.set(this.x, this.y, this.z);
     this.mesh.rotation.y = this.heading;
+    this.mesh.rotation.z = this.roll;
     this.mesh.rotation.x = -this.pitch; // +z is forward, so a positive x rotation would lower the nose
     for (const p of this.frontPivots) p.rotation.y = this.steerState * 0.45;
     for (const w of this.spinners) w.rotation.x = this.wheelAngle;

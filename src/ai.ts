@@ -1,10 +1,14 @@
-import { ACCEL, AXLE_GRIP, DRAG, TURN_DECEL, type Car } from './car';
+import { ACCEL, AXLE_GRIP, BRAKE, DRAG, TURN_DECEL, type Car } from './car';
 import type { Controls } from './input';
 import { worthChasing, type PickupSpot } from './pickups';
 import type { Track } from './track';
 
 /** Half the car plus half a wreck, with a margin: the lateral gap needed to drive past a wreck. */
-const WRECK_CLEARANCE = 2.6;
+const WRECK_CLEARANCE = 3.1;
+/** A car counts as an obstacle when it is this slow (m/s), or this much slower than us. */
+const OBSTACLE_SLOW = 3;
+const OBSTACLE_MUCH_SLOWER = 9;
+const OBSTACLE_STOP_MARGIN = 5; // metres to keep clear of whatever we are slowing for
 
 const wrapAngle = (a: number) => Math.atan2(Math.sin(a), Math.cos(a));
 const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
@@ -150,7 +154,7 @@ export class AiDriver implements Controls {
     let laneTarget = clamp(this.baseLane * (1 - level.racingLine * 0.5) + wobble + cut + this.avoidance(), -limit, limit);
     const crate = runUp ? null : this.pickupLane();
     if (crate !== null) laneTarget = clamp(laneTarget * 0.2 + crate * 0.8, -limit, limit);
-    // Wrecks never move on their own, so plan a clear lane early instead of nudging at the last moment.
+    // Wrecks and cars at a standstill do not get out of the way, so plan a clear lane early instead of nudging at the last moment.
     const wreckLane = this.t < this.detourUntil ? this.detourLane : this.clearLaneAround(limit);
     if (wreckLane !== null) {
       laneTarget = clamp(laneTarget * 0.1 + wreckLane * 0.9, -limit, limit);
@@ -198,9 +202,9 @@ export class AiDriver implements Controls {
       const vGrip = Math.sqrt((2 * AXLE_GRIP * car.stats.grip * 0.7) / c);
       speedCap = Math.min(speedCap, v, vGrip);
     }
-    // Threading past wrecks: ease off a little so there is time to place the car.
-    const wreckCap = wreckLane !== null && this.wreckAheadWithin(25) ? 16 : Infinity;
-    const targetSpeed = runUp ? car.topSpeed * (0.93 + 0.07 * level.corner) : Math.min(wreckCap, speedCap * (0.7 + 0.3 * level.corner));
+    // Slow for whatever is in the way (and ease off to thread past things beside the line).
+    const obstacleCap = this.obstacleSpeedCap();
+    const targetSpeed = Math.min(obstacleCap, runUp ? car.topSpeed * (0.93 + 0.07 * level.corner) : speedCap * (0.7 + 0.3 * level.corner));
     this.throttle = !lapse && speed < targetSpeed ? 1 : 0;
     this.brake = speed > targetSpeed * 1.1 ? 1 : 0;
   }
@@ -295,32 +299,69 @@ export class AiDriver implements Controls {
     return best;
   }
 
-  /** Wrecks within `window` samples ahead of the car (and a few behind it), with the lane each one sits in. */
-  private wrecksNear(ahead: number, behind = 6): { lane: number; dist: number }[] {
-    const n = this.track.sampleCount;
-    const out: { lane: number; dist: number }[] = [];
+  /**
+   * Things in the way: wrecks, cars standing still or crawling, and cars going much slower than us, within `ahead`
+   * samples in front (and a few behind). Each comes with its lane, how far ahead it is (m, along our heading) and its
+   * own speed. Cars keeping up with us are not obstacles; they are handled by the lighter avoidance().
+   */
+  private obstaclesNear(ahead: number, behind = 6, wrecksOnly = false): { lane: number; dist: number; gap: number; speed: number }[] {
+    const { car, track } = this;
+    const n = track.sampleCount;
+    const fx = Math.sin(car.heading);
+    const fz = Math.cos(car.heading);
+    const ours = Math.max(car.vf, 0);
+    const out: { lane: number; dist: number; gap: number; speed: number }[] = [];
     for (const o of this.others()) {
-      if (o === this.car || !o.wrecked) continue;
-      let d = (o.trackIndex - this.car.trackIndex + n) % n;
+      if (o === car || o.airborne) continue;
+      const blocking = o.wrecked || (!wrecksOnly && (o.vf < OBSTACLE_SLOW || ours - o.vf > OBSTACLE_MUCH_SLOWER));
+      if (!blocking) continue;
+      let d = (o.trackIndex - car.trackIndex + n) % n;
       if (d > n / 2) d -= n; // signed samples ahead
       if (d < -behind || d > ahead) continue;
-      out.push({ lane: this.track.query(o.x, o.z, o.trackIndex).lateral, dist: d });
+      out.push({
+        lane: track.query(o.x, o.z, o.trackIndex).lateral,
+        dist: d,
+        gap: (o.x - car.x) * fx + (o.z - car.z) * fz,
+        speed: o.wrecked ? 0 : Math.max(o.vf, 0),
+      });
     }
     return out;
   }
 
-  private wreckAheadWithin(samples: number): boolean {
-    return this.wrecksNear(samples, 0).length > 0;
+  /** How far ahead (samples) a driver looks for obstacles: further when going fast, and less for careless drivers. */
+  private lookAhead(): number {
+    return Math.round((18 + Math.max(this.car.vf, 0) * 1.1) * (0.6 + 0.4 * this.level.corner));
   }
 
   /**
-   * The lane with the most room between the wrecks ahead, or null when none of them is near the lane we are on.
-   * Wrecks that overlap the way are treated together, so a cluster is passed on its open side.
+   * The lane with the most room between the obstacles ahead, or null when none of them is near the lane we are on.
+   * Obstacles that overlap the way are treated together, so a cluster is passed on its open side.
    */
   private clearLaneAround(limit: number): number | null {
-    const wrecks = this.wrecksNear(35);
-    if (!wrecks.some((w) => Math.abs(w.lane - this.lane) < WRECK_CLEARANCE + 1.2)) return null;
-    return this.bestLane(wrecks, limit);
+    const obstacles = this.obstaclesNear(this.lookAhead());
+    if (!obstacles.some((w) => Math.abs(w.lane - this.lane) < WRECK_CLEARANCE + 1.2)) return null;
+    return this.bestLane(obstacles, limit);
+  }
+
+  /**
+   * A speed that lets the car stop (or match the obstacle's speed) before reaching the nearest thing that is in its
+   * lane, braking comfortably; near-misses in the next lane just ease the speed a little. Infinity when the way is clear.
+   */
+  private obstacleSpeedCap(): number {
+    const { car } = this;
+    let cap = Infinity;
+    for (const o of this.obstaclesNear(this.lookAhead(), 0)) {
+      if (o.gap <= 0) continue;
+      const lateral = Math.abs(o.lane - this.lane);
+      if (lateral < WRECK_CLEARANCE) {
+        const room = Math.max(o.gap - OBSTACLE_STOP_MARGIN, 0);
+        const comfortable = BRAKE * car.stats.brake * 0.5;
+        cap = Math.min(cap, o.speed + Math.sqrt(2 * comfortable * room));
+      } else if (lateral < WRECK_CLEARANCE + 1.5 && o.gap < 25) {
+        cap = Math.min(cap, Math.max(o.speed + 9, 14));
+      }
+    }
+    return cap;
   }
 
   private bestLane(wrecks: { lane: number }[], limit: number): number | null {
@@ -352,7 +393,7 @@ export class AiDriver implements Controls {
       this.steer = this.unstickSteer;
       if (this.unstick <= 0) {
         const limit = this.track.halfWidth - 2.2;
-        this.detourLane = this.bestLane(this.wrecksNear(30, 10), limit);
+        this.detourLane = this.bestLane(this.obstaclesNear(30, 10, true), limit);
         this.detourUntil = this.t + 4;
         this.stuckTime = 0;
       }
@@ -388,7 +429,7 @@ export class AiDriver implements Controls {
     const fz = Math.cos(car.heading);
     let offset = 0;
     for (const o of this.others()) {
-      if (o === car || o.wrecked || o.airborne || !this.onSameStretch(o)) continue; // wrecks: see clearLaneAround
+      if (o === car || o.wrecked || o.airborne || !this.onSameStretch(o)) continue; // wrecks and crawlers: see clearLaneAround
       const rx = o.x - car.x;
       const rz = o.z - car.z;
       const g = rx * fx + rz * fz;

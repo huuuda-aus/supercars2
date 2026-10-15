@@ -2,8 +2,10 @@ import * as THREE from 'three';
 import { AiDriver, LEVELS } from './ai';
 import { Car } from './car';
 import { garageCar, GARAGE, type CarId } from './garage';
-import { beginCollisionStep, collideCars } from './collision';
+import { beginCollisionStep, collideCars, onContact } from './collision';
 import { Input, type Controls } from './input';
+import { GameAudio } from './audio';
+import { Gauges } from './gauges';
 import { Minimap } from './minimap';
 import { PICKUP_COLOURS, Pickups } from './pickups';
 import { buildCarModel } from './carmodel';
@@ -79,14 +81,14 @@ scene.add(trees);
 let playerStats = starterStats();
 let car = new Car('You', 0xd8352a, playerStats, 'hatch');
 const rivals = [
-  { car: new Car('Blue', 0x3070e0, undefined, 'sedan'), lane: 3.5, grid: 14 },
-  { car: new Car('Yellow', 0xe0c030, undefined, 'hatch'), lane: -3.5, grid: 24 },
-  { car: new Car('Green', 0x30c060, undefined, 'coupe'), lane: 3.5, grid: 34 },
-  { car: new Car('Orange', 0xe07820, undefined, 'sedan'), lane: -3.5, grid: 44 },
-  { car: new Car('Purple', 0x9040d0, undefined, 'hatch'), lane: 3.5, grid: 54 },
-  { car: new Car('White', 0xe8e8e8, undefined, 'coupe'), lane: -3.5, grid: 64 },
-  { car: new Car('Cyan', 0x30c8d0, undefined, 'sedan'), lane: 3.5, grid: 74 },
-].map((r) => ({ ...r, ai: undefined as unknown as AiDriver }));
+  new Car('Blue', 0x3070e0, undefined, 'sedan'),
+  new Car('Yellow', 0xe0c030, undefined, 'hatch'),
+  new Car('Green', 0x30c060, undefined, 'coupe'),
+  new Car('Orange', 0xe07820, undefined, 'sedan'),
+  new Car('Purple', 0x9040d0, undefined, 'hatch'),
+  new Car('White', 0xe8e8e8, undefined, 'coupe'),
+  new Car('Cyan', 0x30c8d0, undefined, 'sedan'),
+].map((car) => ({ car, ai: undefined as unknown as AiDriver }));
 const allCars = [car, ...rivals.map((r) => r.car)];
 allCars.forEach((c) => {
   scene.add(c.mesh);
@@ -108,17 +110,26 @@ pickups.onCollect = (c, _kind, text) => {
 const race = new Race();
 let levelIndex = loadSettings().difficulty;
 
+/** Starting grid in rows of two: slot 0 is pole position (the player), slot 1 sits beside it, slot 2 starts the next row. */
+const GRID_ROW_GAP = 9; // samples between rows (about 9.6 m)
+const GRID_LANE = 3.5; // metres either side of the centreline
+function gridSlot(slot: number): { index: number; lane: number } {
+  return { index: track.sampleCount - 6 - Math.floor(slot / 2) * GRID_ROW_GAP, lane: (slot % 2 === 0 ? -1 : 1) * GRID_LANE };
+}
+
 function resetRace(): void {
   weapons.clear();
   skidmarks.clear();
   pickups.reset();
   pickupMsgTime = 0;
   car.stats = playerStats;
-  car.placeOnTrack(track, track.sampleCount - 6);
-  for (const r of rivals) {
+  const pole = gridSlot(0);
+  car.placeOnTrack(track, pole.index, pole.lane);
+  for (const [i, r] of rivals.entries()) {
+    const slot = gridSlot(i + 1);
     r.car.stats = aiStats(RIVAL_CAR_TIER);
-    r.car.placeOnTrack(track, track.sampleCount - r.grid, r.lane);
-    r.ai = new AiDriver(r.car, track, r.lane, LEVELS[levelIndex], () => allCars, () => weapons.hazards, () => pickups.spots);
+    r.car.placeOnTrack(track, slot.index, slot.lane);
+    r.ai = new AiDriver(r.car, track, slot.lane, LEVELS[levelIndex], () => allCars, () => weapons.hazards, () => pickups.spots);
   }
 }
 resetRace();
@@ -166,6 +177,10 @@ function updateCamera(): void {
 const input = new Input();
 const hud = document.getElementById('hud')!;
 const minimap = new Minimap(track);
+const gauges = new Gauges();
+const audio = new GameAudio();
+weapons.sound = (e) => audio.playEvent(e);
+onContact((kind, x, z, value) => audio.playEvent({ type: kind === 'car' ? 'crash' : kind, x, z, size: value }));
 const banner = document.getElementById('banner')!;
 const hpBar = document.getElementById('hpbar')!;
 const hpFill = document.getElementById('hpfill')!;
@@ -215,6 +230,7 @@ function setRaceUi(on: boolean): void {
   const display = on ? '' : 'none';
   hud.style.display = hpBar.style.display = banner.style.display = display;
   minimap.setVisible(on);
+  gauges.setVisible(on);
 }
 
 /** Put a different car under the player, with the stats in `playerStats`. */
@@ -392,7 +408,17 @@ let last = performance.now();
 const IDLE: Controls = { throttle: 0, brake: 0, steer: 0, handbrake: 0 };
 const coast = (c: Car): Controls => ({ throttle: 0, brake: c.vf > 1 ? 1 : 0, steer: 0, handbrake: 0 });
 
-function controlsFor(c: Car, live: Controls): Controls {
+/** What a rival does with the throttle while waiting for the lights: idle, then blips, then flat out. */
+function rivalRev(index: number): number {
+  const t = race.countdown;
+  if (t > 2.3) return 0;
+  if (t < 0.7) return 1;
+  return Math.floor(t * (3 + (index % 3))) % 2 === 0 ? 1 : 0;
+}
+
+function controlsFor(c: Car, live: Controls, rev = 0): Controls {
+  // On the grid you can rev the engine (the cars are held in place until the lights change).
+  if (race.state === 'countdown') return { throttle: c === car ? live.throttle : rev, brake: 0, steer: 0, handbrake: 0 };
   if (race.state !== 'racing') return IDLE;
   return c.finished ? coast(c) : live;
 }
@@ -414,7 +440,7 @@ function raceKeys(): void {
 }
 
 function bannerText(): string {
-  if (race.state === 'countdown') return String(Math.ceil(race.countdown));
+  if (race.state === 'countdown') return `${Math.ceil(race.countdown)}\n\nhold ↑ to rev`;
   if (car.finished || car.wrecked) {
     const rows = race.standings(allCars, track).map((c, i) => {
       const t = c.finished ? formatTime(c.finishTime) : c.wrecked ? 'wrecked' : 'racing…';
@@ -431,6 +457,7 @@ function frame(now: number): void {
     last = now;
     acc = 0;
     input.clear();
+    audio.update(false, car, []);
     renderMenu(now);
     requestAnimationFrame(frame);
     return;
@@ -455,11 +482,12 @@ function frame(now: number): void {
   }
   while (acc >= STEP) {
     beginCollisionStep();
+    for (const c of allCars) c.held = race.state === 'countdown';
     weapons.locked = race.weaponsLockedFor > 0;
     if (race.state === 'racing' && !car.finished && input.held('KeyF')) weapons.fireGun(car);
     race.update(STEP, allCars);
     car.step(STEP, controlsFor(car, input), track);
-    for (const r of rivals) {
+    for (const [i, r] of rivals.entries()) {
       r.ai.update(STEP, race.state === 'racing');
       if (race.state === 'racing' && !r.car.finished) {
         if (r.ai.fireMissile) weapons.fireMissile(r.car);
@@ -469,7 +497,7 @@ function frame(now: number): void {
         if (r.ai.useNitro) r.car.useNitro();
         if (r.ai.fireGun) weapons.fireGun(r.car);
       }
-      r.car.step(STEP, controlsFor(r.car, r.ai), track);
+      r.car.step(STEP, controlsFor(r.car, r.ai, rivalRev(i)), track);
     }
     for (let i = 0; i < allCars.length; i++)
       for (let j = i + 1; j < allCars.length; j++) collideCars(allCars[i], allCars[j]);
@@ -493,11 +521,13 @@ function frame(now: number): void {
   const lap = Math.max(1, Math.min(car.lap, race.totalLaps));
   hud.textContent =
     `P${place}/${allCars.length}   lap ${lap}/${race.totalLaps}   ${formatTime(race.time)}\n` +
-    `${(car.speed * 3.6).toFixed(0)} km/h   height ${car.y.toFixed(1)}${car.airborne ? '  AIR' : ''}${car.drifting ? `  DRIFT ${Math.round(car.driftCombo)}` : ''}${car.offroad ? '  OFFROAD' : ''}${car.nitroActive ? '  NITRO' : ''}${car.shieldTimer > 0 ? `  SHIELD ${Math.ceil(car.shieldTimer)}s` : ''}${race.state === 'racing' && race.weaponsLockedFor > 0 ? `  WEAPONS LOCKED ${Math.ceil(race.weaponsLockedFor)}s` : ''}\n` +
+    `height ${car.y.toFixed(1)}${car.airborne ? '  AIR' : ''}${car.drifting ? `  DRIFT ${Math.round(car.driftCombo)}` : ''}${car.offroad ? '  OFFROAD' : ''}${car.nitroActive ? '  NITRO' : ''}${car.shieldTimer > 0 ? `  SHIELD ${Math.ceil(car.shieldTimer)}s` : ''}${race.state === 'racing' && race.weaponsLockedFor > 0 ? `  WEAPONS LOCKED ${Math.ceil(race.weaponsLockedFor)}s` : ''}\n` +
     `[Z] missile ${car.ammo.missiles} · [B] rear ${car.ammo.rearMissiles} · [F] gun ${car.ammo.bullets} · [X] mine ${car.ammo.mines} · [O] oil ${car.ammo.oil} · [Shift] nitro ${car.ammo.nitro}\n` +
     `drift pts ${Math.round(car.driftScore)}${pickupMsgTime > 0 ? `   ${pickupMsg}` : ''}\n` +
-    `arrows/WASD drive · Space handbrake · C camera · R restart · ${LEVELS[levelIndex].name} AI`;
+    `arrows/WASD drive · Space handbrake · C camera · M mute · R restart · ${LEVELS[levelIndex].name} AI`;
   updateHealthBar();
+  audio.update(race.state === 'racing' || race.state === 'countdown', car, rivals.map((r) => r.car));
+  gauges.update(car.rpm, car.gear, car.speed * 3.6);
   banner.textContent = bannerText();
   requestAnimationFrame(frame);
 }

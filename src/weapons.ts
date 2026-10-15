@@ -33,6 +33,15 @@ const MINE_LIFE = 45;
 const MINE_MAX = 14; // oldest mines disappear beyond this
 const MINE_BLAST = { radius: 7.5, power: 13, damage: 18, lift: 8 };
 
+/** Something that makes a noise, for the audio to turn into sound at its place in the world. */
+export interface SoundEvent {
+  type: 'gun' | 'hit' | 'missile' | 'explosion' | 'mineDrop' | 'oil' | 'crash' | 'wall' | 'scrape';
+  x: number;
+  z: number;
+  size?: number; // explosions: the blast radius; crashes and wall hits: the impact speed (m/s); scrapes: the sliding speed
+  onCar?: boolean; // hits: a car (otherwise a wall)
+}
+
 export interface Missile { owner: Car; x: number; z: number; y: number; heading: number; age: number; index: number; mesh: THREE.Object3D }
 export interface Mine { owner: Car; x: number; z: number; y: number; index: number; age: number; mesh: THREE.Object3D }
 interface Bullet { owner: Car; x: number; z: number; y: number; vx: number; vz: number; age: number; index: number }
@@ -46,6 +55,8 @@ export class Weapons {
   readonly oils: Oil[] = [];
   /** While true every weapon refuses to fire or drop (the start-of-race lockout). Set by the game loop. */
   locked = false;
+  /** Called for every sound-making event. Set by the game. */
+  sound: (e: SoundEvent) => void = () => {};
   /** Mines and slicks as plain points, for drivers who steer around them. Rebuilt every step. */
   hazards: { x: number; z: number }[] = [];
   private readonly fx = new Explosions();
@@ -128,6 +139,7 @@ export class Weapons {
     };
     this.missiles.push(missile);
     this.syncMissile(missile);
+    this.sound({ type: 'missile', x: car.x, z: car.z });
     return true;
   }
 
@@ -149,6 +161,7 @@ export class Weapons {
       owner: car, x, z, y: car.y + 0.6, vx: Math.sin(dir) * GUN_SPEED, vz: Math.cos(dir) * GUN_SPEED, age: 0, index: car.trackIndex,
     });
     this.spark(x, car.y + 0.6, z, 0.4, 0.05); // muzzle flash
+    this.sound({ type: 'gun', x, z });
     return true;
   }
 
@@ -173,6 +186,7 @@ export class Weapons {
     this.scene.add(mesh);
     this.mines.push({ owner: car, x, z, y: ground.height, index: ground.index, age: 0, mesh });
     if (this.mines.length > MINE_MAX) this.removeMine(0);
+    this.sound({ type: 'mineDrop', x, z });
     return true;
   }
 
@@ -192,6 +206,7 @@ export class Weapons {
     this.scene.add(mesh);
     this.oils.push({ owner: car, x, z, y, age: 0, mesh });
     if (this.oils.length > OIL_MAX) this.removeOil(0);
+    this.sound({ type: 'oil', x, z });
     return true;
   }
 
@@ -321,6 +336,7 @@ export class Weapons {
         const q = this.track.query(px, pz, b.index);
         if (Math.abs(q.lateral) > this.track.wallOffset - 0.1) {
           this.spark(px, b.y, pz, 0.35, 0.12);
+          this.sound({ type: 'hit', x: px, z: pz, onCar: false });
           hit = true;
           break;
         }
@@ -334,6 +350,7 @@ export class Weapons {
             c.damage(GUN_DAMAGE);
             this.stats.bulletHits++;
             this.spark(px, b.y, pz, 0.5, 0.14);
+            this.sound({ type: 'hit', x: px, z: pz, onCar: true });
             hit = true;
             break;
           }
@@ -401,6 +418,7 @@ export class Weapons {
   }
 
   private explode(x: number, z: number, y: number, blast: typeof MISSILE_BLAST, size: number, index: number): void {
+    this.sound({ type: 'explosion', x, z, size: blast.radius * size });
     const ground = this.track.query(x, z, index);
     this.fx.spawn(x, Math.max(y, ground.height + 0.5), z, blast.radius * size, ground.height, this.groundNormal(x, z, ground.index));
     if (blast.power > 0) for (const c of this.cars) c.applyBlast(x, z, blast.radius, blast.power, blast.damage, blast.lift);

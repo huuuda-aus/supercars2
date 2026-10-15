@@ -25,6 +25,20 @@ const MIN_IMPACT_SPEED = 2.5;
  * hit is charged in full on its first step, steady pushing is free.
  */
 let tick = 0;
+
+/**
+ * Told about contacts worth a sound: 'car' (a car meets a car or a wreck) and 'wall' (a car meets a barrier) carry the
+ * impact speed (m/s); 'scrape' (a car rubbing along a barrier, at most ten times a second) carries the sliding speed.
+ * Set by the game for the sound.
+ */
+export type ContactKind = 'car' | 'wall' | 'scrape';
+let contactListener: ((kind: ContactKind, x: number, z: number, value: number) => void) | null = null;
+export function onContact(listener: (kind: ContactKind, x: number, z: number, value: number) => void): void {
+  contactListener = listener;
+}
+const lastScrape = new WeakMap<Car, number>();
+const SCRAPE_MIN_SPEED = 5; // m/s of sliding along the barrier before it grinds
+const SCRAPE_INTERVAL = 12; // physics steps between scrape sounds
 const lastClosing = new WeakMap<Car, Map<Car | null, { speed: number; tick: number }>>();
 
 /** Call once at the start of every physics step. */
@@ -116,6 +130,7 @@ function resolveContact(a: Car, b: Car | null, p: Vec, n: Vec, restitution: numb
     const hurt = impact * (!b ? WALL_DAMAGE : a.wrecked || b.wrecked ? WRECK_DAMAGE : CAR_DAMAGE);
     a.damage(hurt);
     b?.damage(hurt);
+    contactListener?.(b ? 'car' : 'wall', p.x, p.z, impact);
   }
 
   // Coulomb friction on the tangential slip, limited by the normal impulse.
@@ -124,6 +139,10 @@ function resolveContact(a: Car, b: Car | null, p: Vec, n: Vec, restitution: numb
   const tx = v.x - vn2 * n.x;
   const tz = v.z - vn2 * n.z;
   const vt = Math.hypot(tx, tz);
+  if (!b && vt > SCRAPE_MIN_SPEED && tick - (lastScrape.get(a) ?? -SCRAPE_INTERVAL) >= SCRAPE_INTERVAL) {
+    lastScrape.set(a, tick);
+    contactListener?.('scrape', p.x, p.z, vt);
+  }
   if (vt < 1e-6) return;
   const t = { x: tx / vt, z: tz / vt };
   const jt = Math.min((vt * CONTACT_SOFTNESS) / inverseMass(t), friction * jn);

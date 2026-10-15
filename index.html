@@ -12,6 +12,20 @@
     #hptext { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: #fff; font: bold 12px monospace; text-shadow: 0 0 3px #000; }
     #hud { position: fixed; top: 36px; left: 12px; color: #fff; font: 14px/1.4 monospace; text-shadow: 0 0 3px #000; white-space: pre; pointer-events: none; }
     #banner { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; text-align: center; color: #fff; font: bold 28px/1.5 monospace; text-shadow: 0 0 6px #000, 0 0 2px #000; white-space: pre; pointer-events: none; }
+    #gauges { position: fixed; left: 12px; bottom: 12px; display: flex; gap: 10px; pointer-events: none; }
+    .dial { width: min(230px, 24vw); min-width: 150px; filter: drop-shadow(0 2px 6px rgba(0, 0, 0, 0.6)); }
+    .dial .face { fill: rgba(10, 14, 12, 0.78); stroke: rgba(255, 255, 255, 0.28); stroke-width: 1.5; }
+    .dial .rim { fill: none; stroke: rgba(255, 255, 255, 0.55); stroke-width: 2; }
+    .dial .redzone { fill: none; stroke: #e0402a; stroke-width: 5; opacity: 0.85; }
+    .dial .tick { stroke: rgba(255, 255, 255, 0.55); stroke-width: 1.2; }
+    .dial .tick.major { stroke: #fff; stroke-width: 2; }
+    .dial .tick.red { stroke: #ff6a4a; }
+    .dial .num { fill: #e6e9e2; font: bold 10px monospace; text-anchor: middle; }
+    .dial .num.red { fill: #ff6a4a; }
+    .dial .big { fill: #fff; font: bold 22px monospace; text-anchor: middle; }
+    .dial .unit { fill: #9aa095; font: 9px monospace; text-anchor: middle; }
+    .dial .needle { stroke: #ff5a2a; stroke-width: 3; stroke-linecap: round; }
+    .dial .hub { fill: #2a2f2b; stroke: #ff5a2a; stroke-width: 2; }
     #screen { position: fixed; inset: 0; color: #fff; font: 16px/1.4 monospace; background: radial-gradient(ellipse at center, rgba(8, 12, 10, 0.45), rgba(4, 6, 5, 0.85)); }
     #screen[hidden] { display: none; }
     .screen { position: absolute; inset: 0; display: flex; flex-direction: column; gap: 14px; padding: 24px; box-sizing: border-box; }
