@@ -2,14 +2,14 @@ import * as THREE from 'three';
 import type { Car } from './car';
 import type { Track } from './track';
 
-export type PickupKind = 'ammo' | 'nitro' | 'repair' | 'gun' | 'rear' | 'oil' | 'shield';
+export type PickupKind = 'ammo' | 'nitro' | 'repair' | 'gun' | 'rear' | 'oil' | 'shield' | 'cash';
 
 const SPOT_COUNT = 16;
 const SPOT_LANES = [4.5, -4.5, 0, 4, -4, 1.5, -1.5]; // metres from the centreline, cycled along the lap
 const RESPAWN_TIME = 40; // seconds after being taken
 const COLLECT_RADIUS = 1.9;
 const COLLECT_HEIGHT = 1.8;
-const KIND_WEIGHTS: [PickupKind, number][] = [['ammo', 0.17], ['nitro', 0.13], ['repair', 0.23], ['gun', 0.13], ['rear', 0.12], ['oil', 0.11], ['shield', 0.11]];
+const KIND_WEIGHTS: [PickupKind, number][] = [['ammo', 0.14], ['nitro', 0.11], ['repair', 0.19], ['gun', 0.11], ['rear', 0.1], ['oil', 0.09], ['shield', 0.09], ['cash', 0.17]];
 
 /** What each kind gives. */
 const AMMO_GIFT = { missiles: 3, mines: 3 };
@@ -19,9 +19,11 @@ const GUN_GIFT = 60;
 const REAR_GIFT = 3;
 const OIL_GIFT = 2;
 const SHIELD_GIFT = 8; // seconds
+/** Cash crates are worth one of these, picked when the crate appears (coins on the crate show which). */
+const CASH_VALUES: [number, number][] = [[50, 0.5], [100, 0.33], [150, 0.17]];
 
 /** Map-marker colours for the minimap. */
-export const PICKUP_COLOURS: Record<PickupKind, string> = { ammo: '#e0c030', nitro: '#3f9bff', repair: '#ffffff', gun: '#ff8a30', rear: '#ff4a4a', oil: '#a070ff', shield: '#40e0d0' };
+export const PICKUP_COLOURS: Record<PickupKind, string> = { ammo: '#e0c030', nitro: '#3f9bff', repair: '#ffffff', gun: '#ff8a30', rear: '#ff4a4a', oil: '#a070ff', shield: '#40e0d0', cash: '#ffd23a' };
 
 export interface PickupSpot {
   readonly x: number;
@@ -30,6 +32,7 @@ export interface PickupSpot {
   readonly index: number; // nearest track sample
   readonly lane: number; // offset along the track's side vector
   kind: PickupKind;
+  value: number; // cash crates: dollars
   active: boolean;
   timer: number; // seconds until it is back, while inactive
 }
@@ -43,6 +46,7 @@ export function canUse(car: Car, kind: PickupKind): boolean {
   if (kind === 'rear') return car.ammoRoom('rearMissiles') > 0;
   if (kind === 'oil') return car.ammoRoom('oil') > 0;
   if (kind === 'shield') return car.shieldTimer < 4;
+  if (kind === 'cash') return !car.wrecked;
   return car.health < car.stats.maxHealth;
 }
 
@@ -55,12 +59,14 @@ export function worthChasing(car: Car, kind: PickupKind): boolean {
   if (kind === 'rear') return car.ammoRoom('rearMissiles') >= 2;
   if (kind === 'oil') return car.ammoRoom('oil') >= 2;
   if (kind === 'shield') return car.shieldTimer <= 0;
+  if (kind === 'cash') return true;
   return true;
 }
 
 /** Hand the pickup's contents to the car. Returns a short description of what it got, or null if nothing. */
-function apply(car: Car, kind: PickupKind): string | null {
+function apply(car: Car, kind: PickupKind, value: number): string | null {
   const parts: string[] = [];
+  if (kind === 'cash') return `+$${value}`;
   if (kind === 'ammo') {
     const m = car.give('missiles', AMMO_GIFT.missiles);
     const n = car.give('mines', AMMO_GIFT.mines);
@@ -87,6 +93,15 @@ function apply(car: Car, kind: PickupKind): string | null {
   return parts.length ? parts.join(' ') : null;
 }
 
+function pickCash(): number {
+  let r = Math.random();
+  for (const [value, weight] of CASH_VALUES) {
+    if (r < weight) return value;
+    r -= weight;
+  }
+  return CASH_VALUES[0][0];
+}
+
 function pickKind(): PickupKind {
   let r = Math.random();
   for (const [kind, weight] of KIND_WEIGHTS) {
@@ -106,7 +121,7 @@ const ahead = (i: number, target: number, n: number) => (target - i + n) % n;
 export class Pickups {
   readonly spots: PickupSpot[] = [];
   readonly group = new THREE.Group();
-  onCollect?: (car: Car, kind: PickupKind, text: string) => void;
+  onCollect?: (car: Car, kind: PickupKind, text: string, value: number) => void;
 
   private readonly models: Record<PickupKind, THREE.Group>[] = [];
   private readonly holders: THREE.Group[] = [];
@@ -135,6 +150,7 @@ export class Pickups {
         index: i,
         lane: offset,
         kind: 'ammo',
+        value: 0,
         active: true,
         timer: 0,
       });
@@ -151,6 +167,7 @@ export class Pickups {
         rear: shared.rear(),
         oil: shared.oil(),
         shield: shared.shield(),
+        cash: shared.cash(),
       };
       for (const m of Object.values(models)) holder.add(m);
       const pad = shared.pad();
@@ -168,6 +185,7 @@ export class Pickups {
   reset(): void {
     for (const spot of this.spots) {
       spot.kind = pickKind();
+      spot.value = pickCash();
       spot.active = true;
       spot.timer = 0;
     }
@@ -181,6 +199,7 @@ export class Pickups {
         spot.timer -= dt;
         if (spot.timer <= 0) {
           spot.kind = pickKind();
+          spot.value = pickCash();
           spot.active = true;
           this.sync(i);
         }
@@ -189,12 +208,12 @@ export class Pickups {
       for (const car of cars) {
         if (!canUse(car, spot.kind)) continue;
         if (Math.hypot(car.x - spot.x, car.z - spot.z) > COLLECT_RADIUS || Math.abs(car.y - spot.y) > COLLECT_HEIGHT) continue;
-        const text = apply(car, spot.kind);
+        const text = apply(car, spot.kind, spot.value);
         if (!text) continue;
         spot.active = false;
         spot.timer = RESPAWN_TIME;
         this.sync(i);
-        this.onCollect?.(car, spot.kind, text);
+        this.onCollect?.(car, spot.kind, text, spot.value);
         break;
       }
     });
@@ -218,6 +237,8 @@ export class Pickups {
     this.holders[i].visible = spot.active;
     this.pads[i].material = this.padColours[spot.kind];
     for (const kind of Object.keys(models) as PickupKind[]) models[kind].visible = kind === spot.kind;
+    // A stack of one, two or three coins for $50, $100, $150.
+    (models.cash.userData.coins as THREE.Object3D[]).forEach((coin, k) => (coin.visible = k < spot.value / 50));
   }
 
   /** Geometry and materials are created once and shared by every crate. */
@@ -247,6 +268,8 @@ export class Pickups {
     const orbGeo = new THREE.IcosahedronGeometry(0.5, 1);
     const orbMat = std(0x40e0d0, { metalness: 0.2, emissive: 0x1a8a80, emissiveIntensity: 0.8 });
     const ringGeo = new THREE.TorusGeometry(0.62, 0.05, 6, 20).rotateX(Math.PI / 2);
+    const coinGeo = new THREE.CylinderGeometry(0.46, 0.46, 0.14, 20);
+    const goldMat = std(0xffc82e, { metalness: 0.75, emissive: 0x6b4a00, emissiveIntensity: 0.4 });
     const drumGeo = new THREE.CylinderGeometry(0.4, 0.4, 0.8, 12);
     const drumBandGeo = new THREE.CylinderGeometry(0.42, 0.42, 0.14, 12);
     const drumMat = std(0x16161a, { metalness: 0.4 });
@@ -260,6 +283,7 @@ export class Pickups {
       rear: new THREE.MeshBasicMaterial({ color: 0xff4a4a, transparent: true, opacity: 0.35, depthWrite: false }),
       oil: new THREE.MeshBasicMaterial({ color: 0xa070ff, transparent: true, opacity: 0.35, depthWrite: false }),
       shield: new THREE.MeshBasicMaterial({ color: 0x40e0d0, transparent: true, opacity: 0.35, depthWrite: false }),
+      cash: new THREE.MeshBasicMaterial({ color: 0xffd23a, transparent: true, opacity: 0.4, depthWrite: false }),
     };
     const mesh = (geo: THREE.BufferGeometry, mat: THREE.Material, y = 0) => {
       const m = new THREE.Mesh(geo, mat);
@@ -291,6 +315,18 @@ export class Pickups {
           round.position.x = x;
           g.add(round);
         }
+        return g;
+      },
+      // A stack of gold coins; how many are showing tells the value.
+      cash: () => {
+        const g = new THREE.Group();
+        const coins = [0, 1, 2].map((k) => {
+          const coin = mesh(coinGeo, goldMat, -0.2 + k * 0.17);
+          coin.position.x = k === 1 ? 0.05 : k === 2 ? -0.04 : 0;
+          g.add(coin);
+          return coin;
+        });
+        g.userData.coins = coins;
         return g;
       },
       // Glowing teal orb inside a ring.

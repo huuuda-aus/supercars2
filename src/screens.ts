@@ -1,5 +1,6 @@
+import type { UiSound } from './audio';
 import { GARAGE, type CarId } from './garage';
-import type { SaveGame } from './save';
+import { MAX_NAME_LENGTH, type SaveGame } from './save';
 import type { TrackInfo } from './tracks';
 import { formatSlotValue, MAX_UPGRADE_LEVEL, SLOT_INFO, upgradePrice, UPGRADE_SLOTS, type UpgradeSlot } from './upgrades';
 
@@ -22,13 +23,20 @@ const money = (n: number) => `$${n.toLocaleString('en-US')}`;
 export class Screens {
   private readonly root: HTMLElement;
   private keys: Record<string, Handler> = {};
+  /** Told when a button wants a sound (hovered, chosen, backed out of, bought). Set by the game. */
+  onSound: (kind: UiSound) => void = () => {};
+  private quiet = false; // no hover tick while a screen is just being opened
+  private keyboard = false; // the last input was the keyboard, so focus moves should tick
 
   constructor(root: HTMLElement) {
     this.root = root;
+    addEventListener('pointerdown', () => (this.keyboard = false));
     addEventListener('keydown', (e) => {
       if (this.root.hidden) return;
+      this.keyboard = true;
       const handler = this.keys[e.code];
       if (handler) {
+        if (e.code === 'Escape') this.onSound('back');
         e.preventDefault();
         handler();
       }
@@ -58,15 +66,26 @@ export class Screens {
     this.root.hidden = false;
     this.root.replaceChildren(content);
     this.keys = back ? { Escape: back, ...keys } : keys;
+    this.quiet = true;
     content.querySelector<HTMLButtonElement>('button:not(:disabled)')?.focus();
+    this.quiet = false;
   }
 
-  private button(label: string, onClick: Handler, opts: { disabled?: boolean; hint?: string; selected?: boolean } = {}): HTMLButtonElement {
+  private button(label: string, onClick: Handler, opts: { disabled?: boolean; hint?: string; selected?: boolean; sound?: UiSound } = {}): HTMLButtonElement {
     const b = el('button', opts.selected ? 'selected' : '');
     b.append(el('span', 'label', label));
     if (opts.hint) b.append(el('span', 'hint', opts.hint));
     b.disabled = !!opts.disabled;
-    b.addEventListener('click', onClick);
+    b.addEventListener('mouseenter', () => {
+      if (!b.disabled) this.onSound('hover');
+    });
+    b.addEventListener('focus', () => {
+      if (this.keyboard && !this.quiet && !b.disabled) this.onSound('hover');
+    });
+    b.addEventListener('click', () => {
+      this.onSound(opts.sound ?? 'select');
+      onClick();
+    });
     return b;
   }
 
@@ -85,6 +104,35 @@ export class Screens {
     this.open(page);
   }
 
+  /** Ask for the player's name before a new game. */
+  showName(o: { initial: string; onDone: (name: string) => void; onBack: Handler }): void {
+    const page = el('div', 'screen centre');
+    page.append(el('h2', '', 'What is your name, driver?'));
+    const field = el('input', 'name-field');
+    field.type = 'text';
+    field.maxLength = MAX_NAME_LENGTH;
+    field.value = o.initial;
+    field.placeholder = 'Your name';
+    field.autocomplete = 'off';
+    field.spellcheck = false;
+    const done = () => o.onDone(field.value);
+    field.addEventListener('keydown', (e) => {
+      if (e.code === 'Enter') {
+        e.preventDefault();
+        this.onSound('select');
+        done();
+      }
+    });
+    const menu = el('div', 'menu');
+    const go = this.button('Continue', done);
+    go.classList.add('primary');
+    menu.append(field, go, this.button('Back', o.onBack, { sound: 'back' }));
+    page.append(menu, el('p', 'note', `Up to ${MAX_NAME_LENGTH} characters. It goes on the results board.`));
+    this.open(page, o.onBack);
+    field.focus();
+    field.select();
+  }
+
   showCarSelect(o: { onPreview: (id: CarId) => void; onPick: (id: CarId) => void; onBack: Handler }): void {
     let index = 0;
     const page = el('div', 'screen carselect');
@@ -98,7 +146,7 @@ export class Screens {
     const note = el('p', 'note', 'All three start with the same stock performance. Win races, buy upgrades.');
     const pick = this.button('Start racing', () => o.onPick(GARAGE[index].id));
     pick.classList.add('primary');
-    side.append(note, pick, this.button('Back', o.onBack));
+    side.append(note, pick, this.button('Back', o.onBack, { sound: 'back' }));
     page.append(side);
     const select = (i: number) => {
       index = (i + GARAGE.length) % GARAGE.length;
@@ -114,7 +162,7 @@ export class Screens {
     page.append(el('h2', '', 'Training: choose a track'));
     const menu = el('div', 'menu');
     o.tracks.forEach((t, i) => menu.append(this.button(t.name, () => o.onPick(i), { hint: t.description })));
-    menu.append(this.button('Back', o.onBack));
+    menu.append(this.button('Back', o.onBack, { sound: 'back' }));
     page.append(menu, el('p', 'note', 'A practice race in a stock car. Nothing is saved.'));
     this.open(page, o.onBack);
   }
@@ -131,7 +179,7 @@ export class Screens {
       menu.append(b);
       return b;
     });
-    menu.append(this.button('Back', o.onBack));
+    menu.append(this.button('Back', o.onBack, { sound: 'back' }));
     page.append(menu);
     this.open(page, o.onBack);
   }
@@ -151,12 +199,12 @@ export class Screens {
 
     const header = el('div', 'shop-head');
     const title = el('div', 'shop-title');
-    title.append(el('h2', '', 'Garage & shop'), el('div', 'sub', `${o.carName}  ·  ${g.racesDone} race${g.racesDone === 1 ? '' : 's'} done`));
+    title.append(el('h2', '', 'Garage & shop'), el('div', 'sub', `${g.name}  ·  ${o.carName}  ·  ${g.racesDone} race${g.racesDone === 1 ? '' : 's'} done`));
     const wallet = el('div', 'wallet');
     wallet.append(el('div', 'amount', money(g.money)));
     if (g.lastRace) {
       wallet.append(
-        el('div', 'sub', `last: ${g.lastRace.finished ? `P${g.lastRace.position}` : 'DNF'} at ${g.lastRace.track}${g.lastRace.prize ? `  +${money(g.lastRace.prize)}` : ''}`),
+        el('div', 'sub', `last: ${g.lastRace.finished ? `P${g.lastRace.position}` : 'DNF'} at ${g.lastRace.track}${g.lastRace.prize + g.lastRace.cash ? `  +${money(g.lastRace.prize + g.lastRace.cash)}` : ''}`),
       );
     }
     header.append(title, wallet);
@@ -185,7 +233,7 @@ export class Screens {
         action = this.button('Maxed out', () => {}, { disabled: true });
       } else {
         const price = upgradePrice(level + 1);
-        action = this.button(`Buy · ${money(price)}`, () => o.onBuy(slot), { disabled: g.money < price });
+        action = this.button(`Buy · ${money(price)}`, () => o.onBuy(slot), { disabled: g.money < price, sound: 'buy' });
         if (g.money >= price) action.classList.add('primary');
       }
       if (o.focus === slot && !action.disabled) focusTarget = action;
@@ -197,7 +245,7 @@ export class Screens {
     const footer = el('div', 'shop-foot');
     const next = this.button(`Next race: ${o.nextTrack.name}`, o.onNextRace, { hint: `race ${g.racesDone + 1}` });
     next.classList.add('primary');
-    footer.append(this.button('Main menu', o.onMenu), next);
+    footer.append(this.button('Main menu', o.onMenu, { sound: 'back' }), next);
 
     page.append(header, tiles, footer);
     const step = (n: number) => () => this.moveFocus(n);

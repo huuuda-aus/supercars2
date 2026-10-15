@@ -7,9 +7,10 @@ import { Input, type Controls } from './input';
 import { GameAudio } from './audio';
 import { Gauges } from './gauges';
 import { Minimap } from './minimap';
+import { Popups } from './popups';
 import { PICKUP_COLOURS, Pickups } from './pickups';
 import { buildCarModel } from './carmodel';
-import { loadGame, loadSettings, newGame, prizeFor, saveGame, saveSettings, type SaveGame } from './save';
+import { cleanName, loadGame, loadSettings, newGame, prizeFor, saveGame, saveSettings, type SaveGame } from './save';
 import { Screens } from './screens';
 import { trackForRace, TRACK_LIST } from './tracks';
 import { formatTime, Race } from './race';
@@ -79,7 +80,8 @@ const trees = createTrees(track);
 scene.add(trees);
 
 let playerStats = starterStats();
-let car = new Car('You', 0xd8352a, playerStats, 'hatch');
+let playerName = 'You';
+let car = new Car(playerName, 0xd8352a, playerStats, 'hatch');
 const rivals = [
   new Car('Blue', 0x3070e0, undefined, 'sedan'),
   new Car('Yellow', 0xe0c030, undefined, 'hatch'),
@@ -101,9 +103,13 @@ const weapons = new Weapons(scene, track);
 const pickups = new Pickups(track);
 scene.add(pickups.group);
 let pickupMsg = '';
+let raceCash = 0; // cash crates picked up in this race; banked when you finish it (career only)
 let pickupMsgTime = 0;
-pickups.onCollect = (c, _kind, text) => {
+pickups.onCollect = (c, kind, text, value) => {
+  audio.playEvent({ type: 'pickup', x: c.x, z: c.z, kind });
   if (c !== car) return;
+  if (kind === 'cash') raceCash += value;
+  popups.spawn(PICKUP_NAMES[kind] ?? kind, text, PICKUP_COLOURS[kind]);
   pickupMsg = text;
   pickupMsgTime = 2;
 };
@@ -118,6 +124,7 @@ function gridSlot(slot: number): { index: number; lane: number } {
 }
 
 function resetRace(): void {
+  raceCash = 0;
   weapons.clear();
   skidmarks.clear();
   pickups.reset();
@@ -179,6 +186,8 @@ const hud = document.getElementById('hud')!;
 const minimap = new Minimap(track);
 const gauges = new Gauges();
 const audio = new GameAudio();
+const popups = new Popups();
+const PICKUP_NAMES: Record<string, string> = { ammo: 'Ammo crate', nitro: 'Nitro', repair: 'Repair kit', gun: 'Gun ammo', rear: 'Rear missiles', oil: 'Oil slicks', shield: 'Shield', cash: 'Cash' };
 weapons.sound = (e) => audio.playEvent(e);
 onContact((kind, x, z, value) => audio.playEvent({ type: kind === 'car' ? 'crash' : kind, x, z, size: value }));
 const banner = document.getElementById('banner')!;
@@ -197,6 +206,7 @@ function updateHealthBar(): void {
 
 // --- Screens and game flow -------------------------------------------------------------------------------------
 const screens = new Screens(document.getElementById('screen')!);
+screens.onSound = (kind) => audio.playUi(kind);
 
 /** A turntable stage for the car chooser. */
 const previewScene = new THREE.Scene();
@@ -237,7 +247,7 @@ function setRaceUi(on: boolean): void {
 function setPlayerCar(id: CarId): void {
   const def = garageCar(id);
   scene.remove(car.mesh);
-  car = new Car('You', def.color, playerStats, def.style);
+  car = new Car(playerName, def.color, playerStats, def.style);
   scene.add(car.mesh);
   shade(car.mesh, true, true);
   allCars[0] = car;
@@ -249,6 +259,7 @@ function enterMenu(show: () => void): void {
   previewing = false;
   race.toMenu();
   setRaceUi(false);
+  popups.clear();
   resetRace();
   input.clear();
   show();
@@ -258,10 +269,13 @@ function startRace(): void {
   levelIndex = loadSettings().difficulty;
   if (careerGame) {
     playerStats = statsFor(careerGame.levels);
+    playerName = careerGame.name;
     setPlayerCar(careerGame.carId);
   } else {
     playerStats = starterStats();
-    setPlayerCar(loadGame()?.carId ?? GARAGE[GARAGE.length - 1].id);
+    const saved = loadGame();
+    playerName = saved?.name ?? 'You';
+    setPlayerCar(saved?.carId ?? GARAGE[GARAGE.length - 1].id);
   }
   resetRace();
   race.start();
@@ -283,8 +297,8 @@ function finishRace(): void {
   }
   const position = race.standings(allCars, track).indexOf(car) + 1;
   const prize = prizeFor(position);
-  careerGame.money += prize;
-  careerGame.lastRace = { track: raceTrackName(), position, finished: car.finished, prize };
+  careerGame.money += prize + raceCash;
+  careerGame.lastRace = { track: raceTrackName(), position, finished: car.finished, prize, cash: raceCash };
   careerGame.racesDone++;
   saveGame(careerGame);
   showShop(careerGame);
@@ -301,7 +315,7 @@ function showTitle(): void {
       canResume: loadGame() !== null,
       onNew: () => {
         if (loadGame() && !confirm('Start a new game? Your saved progress will be lost.')) return;
-        showCarSelect();
+        showNameEntry();
       },
       onResume: () => {
         const game = loadGame();
@@ -313,13 +327,23 @@ function showTitle(): void {
   );
 }
 
-function showCarSelect(): void {
+function showNameEntry(): void {
+  enterMenu(() =>
+    screens.showName({
+      initial: loadGame()?.name ?? '',
+      onDone: (name) => showCarSelect(cleanName(name)),
+      onBack: showTitle,
+    }),
+  );
+}
+
+function showCarSelect(name: string): void {
   enterMenu(() => {
     previewing = true;
     screens.showCarSelect({
       onPreview: setPreview,
       onPick: (id) => {
-        careerGame = newGame(id);
+        careerGame = newGame(id, name);
         saveGame(careerGame);
         startRace();
       },
@@ -371,6 +395,7 @@ function buyUpgrade(game: SaveGame, slot: UpgradeSlot): void {
 function showShop(game: SaveGame, focus?: UpgradeSlot): void {
   careerGame = game;
   playerStats = statsFor(game.levels);
+  playerName = game.name;
   setPlayerCar(game.carId);
   enterMenu(() =>
     screens.showShop({
@@ -442,12 +467,14 @@ function raceKeys(): void {
 function bannerText(): string {
   if (race.state === 'countdown') return `${Math.ceil(race.countdown)}\n\nhold ↑ to rev`;
   if (car.finished || car.wrecked) {
-    const rows = race.standings(allCars, track).map((c, i) => {
+    const standings = race.standings(allCars, track);
+    const width = Math.max(7, ...standings.map((c) => c.name.length));
+    const rows = standings.map((c, i) => {
       const t = c.finished ? formatTime(c.finishTime) : c.wrecked ? 'wrecked' : 'racing…';
       const prize = careerGame ? `  $${prizeFor(i + 1)}` : '';
-      return `${i + 1}. ${c.name.padEnd(7)} ${t.padEnd(8)}${prize}${c === car ? '  <' : ''}`;
+      return `${i + 1}. ${c.name.padEnd(width)} ${t.padEnd(8)}${prize}${c === car ? '  <' : ''}`;
     });
-    return `${car.wrecked ? 'WRECKED' : 'FINISHED'}\n\n${rows.join('\n')}\n\nEnter: continue · R: restart · Esc: quit`;
+    return `${car.wrecked ? 'WRECKED' : 'FINISHED'}\n\n${rows.join('\n')}\n\n${careerGame ? `Cash picked up: $${raceCash}\n` : ''}Enter: continue · R: restart · Esc: quit`;
   }
   return race.time < 1 ? 'GO!' : '';
 }
@@ -462,8 +489,9 @@ function frame(now: number): void {
     requestAnimationFrame(frame);
     return;
   }
-  acc += Math.min((now - last) / 1000, 0.1);
-  pickupMsgTime = Math.max(0, pickupMsgTime - (now - last) / 1000);
+  const frameTime = Math.min((now - last) / 1000, 0.1);
+  acc += frameTime;
+  pickupMsgTime = Math.max(0, pickupMsgTime - frameTime);
   last = now;
   weapons.locked = race.weaponsLockedFor > 0; // also here, so keys read below see the current lockout
   // Weapon keys: Z = missile, X = mine, Shift or N = nitro. Read once per frame.
@@ -525,6 +553,10 @@ function frame(now: number): void {
     `[Z] missile ${car.ammo.missiles} · [B] rear ${car.ammo.rearMissiles} · [F] gun ${car.ammo.bullets} · [X] mine ${car.ammo.mines} · [O] oil ${car.ammo.oil} · [Shift] nitro ${car.ammo.nitro}\n` +
     `drift pts ${Math.round(car.driftScore)}${pickupMsgTime > 0 ? `   ${pickupMsg}` : ''}\n` +
     `arrows/WASD drive · Space handbrake · C camera · M mute · R restart · ${LEVELS[levelIndex].name} AI`;
+  // Tooltips float above the car, wherever the camera has it on screen.
+  const view = useOrtho ? ortho : chase;
+  const above = new THREE.Vector3(car.x, car.y + 1, car.z).project(view);
+  popups.update(frameTime, (above.x * 0.5 + 0.5) * innerWidth, (-above.y * 0.5 + 0.5) * innerHeight);
   updateHealthBar();
   audio.update(race.state === 'racing' || race.state === 'countdown', car, rivals.map((r) => r.car));
   gauges.update(car.rpm, car.gear, car.speed * 3.6);

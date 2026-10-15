@@ -1,4 +1,5 @@
 import type { Car } from './car';
+import { typingInField } from './input';
 import type { SoundEvent } from './weapons';
 
 const REDLINE_RPM = 5600; // what a rev fraction of 1 means in pitch (the dial says 7000; a lower pitch makes it a deeper engine)
@@ -257,6 +258,8 @@ function squealOf(car: Car): number {
  * Procedural engine, tyre and weapon sounds, no sample files. The audio context can only start after the player has
  * pressed a key or clicked, so everything is a no-op until then. M mutes.
  */
+export type UiSound = 'hover' | 'select' | 'back' | 'buy';
+
 export class GameAudio {
   private ctx: AudioContext | null = null;
   private master: GainNode | null = null;
@@ -274,7 +277,7 @@ export class GameAudio {
     addEventListener('pointerdown', start);
     addEventListener('keydown', (e) => {
       start();
-      if (e.code === 'KeyM' && !e.repeat) this.toggleMute();
+      if (e.code === 'KeyM' && !e.repeat && !typingInField(e)) this.toggleMute();
     });
   }
 
@@ -404,6 +407,15 @@ export class GameAudio {
         this.tone(out, t, 'sawtooth', 260 + 120 * power, 230 + 90 * power, 0.14, 0.07 * power);
         break;
       }
+      case 'pickup': {
+        // A bright two-note chime (a perfect fifth up), pitched by the kind of crate, with a little sparkle on top.
+        const base = ({ ammo: 700, nitro: 880, repair: 587, gun: 740, rear: 660, oil: 520, shield: 988, cash: 1175 } as Record<string, number>)[e.kind ?? ''] ?? 700;
+        this.tone(out, t, 'triangle', base, base, 0.2, 0.34);
+        this.tone(out, t + 0.07, 'triangle', base * 1.5, base * 1.5, 0.3, 0.3);
+        this.tone(out, t + 0.07, 'sine', base * 3, base * 3, 0.18, 0.08);
+        this.noiseBurst(out, t + 0.06, 0.12, 'highpass', 5500, 5500, 0.08);
+        break;
+      }
       case 'mineDrop':
         this.tone(out, t, 'sine', 320, 110, 0.14, 0.5);
         this.noiseBurst(out, t, 0.04, 'bandpass', 1800, 1800, 0.2);
@@ -412,6 +424,34 @@ export class GameAudio {
       case 'oil':
         this.noiseBurst(out, t, 0.3, 'bandpass', 800, 260, 0.4, 0.01); // a wet splat
         this.tone(out, t, 'sine', 140, 70, 0.12, 0.35);
+        break;
+    }
+  }
+
+  /** Menu sounds: not placed in the world, always at full volume. */
+  playUi(kind: UiSound): void {
+    const ctx = this.ctx;
+    if (!ctx || !this.master || !this.noise || this.muted) return;
+    const out = ctx.createGain();
+    out.gain.value = 0.7;
+    out.connect(this.master);
+    const t = ctx.currentTime;
+    switch (kind) {
+      case 'hover':
+        this.tone(out, t, 'sine', 1500, 1500, 0.03, 0.12); // a faint tick
+        break;
+      case 'select':
+        this.tone(out, t, 'triangle', 520, 780, 0.09, 0.4); // a short rising blip
+        this.noiseBurst(out, t, 0.02, 'highpass', 4000, 4000, 0.1);
+        break;
+      case 'back':
+        this.tone(out, t, 'triangle', 640, 380, 0.1, 0.36); // the same, falling
+        break;
+      case 'buy':
+        // A coin: two high notes ringing out together.
+        this.tone(out, t, 'sine', 1319, 1319, 0.32, 0.34);
+        this.tone(out, t + 0.06, 'sine', 1760, 1760, 0.4, 0.3);
+        this.noiseBurst(out, t, 0.05, 'highpass', 6000, 6000, 0.1);
         break;
     }
   }

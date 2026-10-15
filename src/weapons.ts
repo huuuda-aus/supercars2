@@ -35,11 +35,12 @@ const MINE_BLAST = { radius: 7.5, power: 13, damage: 18, lift: 8 };
 
 /** Something that makes a noise, for the audio to turn into sound at its place in the world. */
 export interface SoundEvent {
-  type: 'gun' | 'hit' | 'missile' | 'explosion' | 'mineDrop' | 'oil' | 'crash' | 'wall' | 'scrape';
+  type: 'gun' | 'hit' | 'missile' | 'explosion' | 'mineDrop' | 'oil' | 'crash' | 'wall' | 'scrape' | 'pickup';
   x: number;
   z: number;
   size?: number; // explosions: the blast radius; crashes and wall hits: the impact speed (m/s); scrapes: the sliding speed
   onCar?: boolean; // hits: a car (otherwise a wall)
+  kind?: string; // pickups: which kind of crate
 }
 
 export interface Missile { owner: Car; x: number; z: number; y: number; heading: number; age: number; index: number; mesh: THREE.Object3D }

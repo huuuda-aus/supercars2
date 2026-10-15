@@ -5,12 +5,19 @@ export interface Controls {
   readonly handbrake: number; // locks the rear wheels: the car's tail steps out for a drift
 }
 
+/** True when a key event comes from a text box. */
+export function typingInField(e: KeyboardEvent): boolean {
+  const tag = (e.target as HTMLElement | null)?.tagName;
+  return tag === 'INPUT' || tag === 'TEXTAREA';
+}
+
 export class Input implements Controls {
   private down = new Set<string>();
   private pressed = new Set<string>();
 
   constructor() {
     addEventListener('keydown', (e) => {
+      if (typingInField(e)) return; // typing a name is not driving
       if (!this.down.has(e.code)) this.pressed.add(e.code);
       this.down.add(e.code);
       if (e.code.startsWith('Arrow') || e.code === 'Space') e.preventDefault();
