@@ -13,10 +13,10 @@ const CAR_PUSH_OUT = 0.3;
 const MAX_IMPACT_YAW = 5; // rad/s
 
 // Damage per m/s of impact speed (closing speed along the contact normal when the contact starts or gets harder).
-const WALL_DAMAGE = 1.4; // a 20 m/s wall hit costs about 28 HP
-const CAR_DAMAGE = 1.1; // each car takes this per m/s of speed difference along the contact normal
+const WALL_DAMAGE = 1.0; // a 20 m/s head-on wall hit costs about 20 HP
+const CAR_DAMAGE = 0.3; // each car takes this per m/s of speed difference along the contact normal
 /** Closing speed that is free: engine push, leaning on a wall or nose-to-tail shoving never gets above this. */
-const MIN_IMPACT_SPEED = 1.0;
+const MIN_IMPACT_SPEED = 2.5;
 
 /**
  * Contacts are soft (a hit plays out over several steps and a car pushing on another keeps re-creating a small
@@ -43,6 +43,10 @@ function impactSpeed(car: Car, other: Car | null, closing: number): number {
 
 const CAR_RESTITUTION = 0.05;
 const CAR_FRICTION = 0.2;
+/** A burnt-out hulk is much heavier than a running car (and drags on the road, see WRECK_FRICTION in car.ts): a fast hit shoves it a few metres, a car just leaning on it cannot move it. */
+const WRECK_MASS = 2.5;
+const WRECK_DAMAGE = 0.6; // per m/s of impact speed when a car hits a wreck (it is a hard, crumpled obstacle)
+const invMassOf = (c: Car) => (c.wrecked ? 1 / WRECK_MASS : 1);
 const WALL_RESTITUTION = 0.05;
 const WALL_FRICTION = 0.2;
 
@@ -64,10 +68,10 @@ function pointVelocity(c: Car, r: Vec): Vec {
 const BREAKAWAY_PER_IMPULSE = 1.6;
 const BREAKAWAY_MAX = 1.2;
 
-function applyImpulse(c: Car, r: Vec, j: Vec, tailTap = false): void {
+function applyImpulse(c: Car, r: Vec, j: Vec, tailTap = false, invMass = 1): void {
   const v = c.worldVelocity();
-  c.setWorldVelocity(v.x + j.x, v.z + j.z);
-  const dOmega = cross2(r, j) / IMPACT_INERTIA;
+  c.setWorldVelocity(v.x + j.x * invMass, v.z + j.z * invMass);
+  const dOmega = (cross2(r, j) * invMass) / IMPACT_INERTIA;
   c.omega = Math.max(-MAX_IMPACT_YAW, Math.min(MAX_IMPACT_YAW, c.omega + dOmega));
   c.lastImpact = Math.max(c.lastImpact, Math.hypot(j.x, j.z) + Math.abs(dOmega));
 
@@ -92,11 +96,13 @@ function resolveContact(a: Car, b: Car | null, p: Vec, n: Vec, restitution: numb
     const vb = b ? pointVelocity(b, rb) : { x: 0, z: 0 };
     return { x: vb.x - va.x, z: vb.z - va.z };
   };
+  const ia = invMassOf(a);
+  const ib = b ? invMassOf(b) : 0; // a wall never moves
   const inverseMass = (dir: Vec) =>
-    1 + (b ? 1 : 0) + cross2(ra, dir) ** 2 / IMPACT_INERTIA + (b ? cross2(rb, dir) ** 2 / IMPACT_INERTIA : 0);
+    ia * (1 + cross2(ra, dir) ** 2 / IMPACT_INERTIA) + (b ? ib * (1 + cross2(rb, dir) ** 2 / IMPACT_INERTIA) : 0);
   const push = (j: Vec) => {
-    applyImpulse(a, ra, { x: -j.x, z: -j.z }, !!b);
-    if (b) applyImpulse(b, rb, j, true);
+    applyImpulse(a, ra, { x: -j.x, z: -j.z }, !!b, ia);
+    if (b) applyImpulse(b, rb, j, true, ib);
   };
 
   const vn = (() => { const v = relVel(); return v.x * n.x + v.z * n.z; })();
@@ -107,7 +113,7 @@ function resolveContact(a: Car, b: Car | null, p: Vec, n: Vec, restitution: numb
   // Both cars (or the one against a wall or wreck) are hurt in proportion to the impact speed.
   const impact = impactSpeed(a, b, -vn);
   if (impact > 0) {
-    const hurt = impact * (b ? CAR_DAMAGE : WALL_DAMAGE);
+    const hurt = impact * (!b ? WALL_DAMAGE : a.wrecked || b.wrecked ? WRECK_DAMAGE : CAR_DAMAGE);
     a.damage(hurt);
     b?.damage(hurt);
   }
@@ -126,7 +132,7 @@ function resolveContact(a: Car, b: Car | null, p: Vec, n: Vec, restitution: numb
 
 /** Car-vs-car: SAT on the two oriented footprints, then contact point, positional fix and impulses. */
 export function collideCars(a: Car, b: Car): void {
-  if (a.wrecked && b.wrecked) return;
+  if (a.wrecked && b.wrecked && a.speed + b.speed < 0.05) return; // two hulks at rest
   if (Math.abs(a.y - b.y) > 1.5) return;
   if ((a.x - b.x) ** 2 + (a.z - b.z) ** 2 > 36) return;
 
@@ -167,21 +173,14 @@ export function collideCars(a: Car, b: Car): void {
     z: deep.reduce((s, c) => s + c.z, 0) / deep.length,
   };
 
-  // A wreck is an immovable obstacle: the other car is pushed fully out and bounces off it like a wall.
-  if (a.wrecked || b.wrecked) {
-    const live = a.wrecked ? b : a;
-    const toWreck = a.wrecked ? { x: -n.x, z: -n.z } : n;
-    live.x -= toWreck.x * depth;
-    live.z -= toWreck.z * depth;
-    resolveContact(live, null, p, toWreck, WALL_RESTITUTION, WALL_FRICTION);
-    return;
-  }
-
-  const push = (depth * CAR_PUSH_OUT) / 2;
-  a.x -= n.x * push;
-  a.z -= n.z * push;
-  b.x += n.x * push;
-  b.z += n.z * push;
+  // Positional fix, shared by inverse mass: the lighter body gives way more.
+  const ia = invMassOf(a);
+  const ib = invMassOf(b);
+  const push = depth * CAR_PUSH_OUT;
+  a.x -= (n.x * push * ia) / (ia + ib);
+  a.z -= (n.z * push * ia) / (ia + ib);
+  b.x += (n.x * push * ib) / (ia + ib);
+  b.z += (n.z * push * ib) / (ia + ib);
   resolveContact(a, b, p, n, CAR_RESTITUTION, CAR_FRICTION);
 }
 

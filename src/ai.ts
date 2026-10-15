@@ -3,6 +3,9 @@ import type { Controls } from './input';
 import { worthChasing, type PickupSpot } from './pickups';
 import type { Track } from './track';
 
+/** Half the car plus half a wreck, with a margin: the lateral gap needed to drive past a wreck. */
+const WRECK_CLEARANCE = 2.6;
+
 const wrapAngle = (a: number) => Math.atan2(Math.sin(a), Math.cos(a));
 const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
 
@@ -26,8 +29,8 @@ export interface AiLevel {
 
 export const LEVELS: AiLevel[] = [
   { name: 'Rookie', corner: 0.3, wander: 3.0, steerNoise: 0.5, mistakesPerSec: 0.15, racingLine: 0, pit: 0, pitSkill: 0, missile: 0.15, mine: 0.1, rearMissile: 0.1, oil: 0.05, nitro: 0.05, gun: 0.3, pickup: 0.3 },
-  { name: 'Pro', corner: 0.65, wander: 1.8, steerNoise: 0.3, mistakesPerSec: 0.06, racingLine: 0.5, pit: 0.4, pitSkill: 0.5, missile: 0.6, mine: 0.4, rearMissile: 0.5, oil: 0.25, nitro: 0.2, gun: 0.8, pickup: 0.7 },
-  { name: 'Elite', corner: 0.95, wander: 0.8, steerNoise: 0.12, mistakesPerSec: 0.02, racingLine: 1, pit: 1.2, pitSkill: 0.9, missile: 1.5, mine: 1.0, rearMissile: 1.2, oil: 0.6, nitro: 0.5, gun: 2, pickup: 1 },
+  { name: 'Pro', corner: 0.65, wander: 1.8, steerNoise: 0.3, mistakesPerSec: 0.06, racingLine: 0.5, pit: 0.4, pitSkill: 0.5, missile: 0.4, mine: 0.25, rearMissile: 0.3, oil: 0.15, nitro: 0.2, gun: 0.8, pickup: 0.7 },
+  { name: 'Elite', corner: 0.95, wander: 0.8, steerNoise: 0.12, mistakesPerSec: 0.02, racingLine: 1, pit: 1.2, pitSkill: 0.9, missile: 0.7, mine: 0.4, rearMissile: 0.55, oil: 0.35, nitro: 0.5, gun: 2, pickup: 1 },
 ];
 
 /**
@@ -55,6 +58,13 @@ export class AiDriver implements Controls {
   private recovering = false;
   private stun = 0; // seconds of lost control after an impact
   private dodging = false; // a mine is lying in the way, so change lane quickly
+
+  // Stuck handling (typically nose-first against a wreck): reverse away, then take a lane that is clear.
+  private stuckTime = 0;
+  private unstick = 0; // seconds of reversing left
+  private unstickSteer = 0;
+  private detourLane: number | null = null;
+  private detourUntil = 0;
 
   // PIT maneuver: 'approach' lines up beside the target's rear quarter, 'strike' steers into it.
   private pitState: 'none' | 'approach' | 'strike' = 'none';
@@ -88,7 +98,7 @@ export class AiDriver implements Controls {
     this.lane = baseLane;
   }
 
-  update(dt: number): void {
+  update(dt: number, racing = true): void {
     const { car, track, level } = this;
     const n = track.sampleCount;
     const speed = Math.max(car.vf, 0);
@@ -105,6 +115,8 @@ export class AiDriver implements Controls {
       this.throttle = this.brake = this.steer = 0;
       return;
     }
+
+    if (this.updateStuck(dt, racing)) return;
 
     // The jump needs near top speed to clear the pit, so every driver commits to a run-up: no lapses,
     // no PIT attempts (they slow the car), and a target speed set by the jump rather than the skill cap.
@@ -137,6 +149,12 @@ export class AiDriver implements Controls {
     let laneTarget = clamp(this.baseLane * (1 - level.racingLine * 0.5) + wobble + cut + this.avoidance(), -limit, limit);
     const crate = runUp ? null : this.pickupLane();
     if (crate !== null) laneTarget = clamp(laneTarget * 0.2 + crate * 0.8, -limit, limit);
+    // Wrecks never move on their own, so plan a clear lane early instead of nudging at the last moment.
+    const wreckLane = this.t < this.detourUntil ? this.detourLane : this.clearLaneAround(limit);
+    if (wreckLane !== null) {
+      laneTarget = clamp(laneTarget * 0.1 + wreckLane * 0.9, -limit, limit);
+      this.dodging = true;
+    }
     this.lane += (laneTarget - this.lane) * Math.min(1, dt * (this.dodging ? 8 : 2));
 
     const tx = target.p.x + side.x * this.lane;
@@ -177,7 +195,9 @@ export class AiDriver implements Controls {
       const v = (-DRAG + Math.sqrt(DRAG * DRAG + 4 * TURN_DECEL * c * budget)) / (2 * TURN_DECEL * c);
       speedCap = Math.min(speedCap, v);
     }
-    const targetSpeed = runUp ? car.topSpeed * (0.93 + 0.07 * level.corner) : speedCap * (0.7 + 0.3 * level.corner);
+    // Threading past wrecks: ease off a little so there is time to place the car.
+    const wreckCap = wreckLane !== null && this.wreckAheadWithin(25) ? 16 : Infinity;
+    const targetSpeed = runUp ? car.topSpeed * (0.93 + 0.07 * level.corner) : Math.min(wreckCap, speedCap * (0.7 + 0.3 * level.corner));
     this.throttle = !lapse && speed < targetSpeed ? 1 : 0;
     this.brake = speed > targetSpeed * 1.1 ? 1 : 0;
   }
@@ -272,6 +292,92 @@ export class AiDriver implements Controls {
     return best;
   }
 
+  /** Wrecks within `window` samples ahead of the car (and a few behind it), with the lane each one sits in. */
+  private wrecksNear(ahead: number, behind = 6): { lane: number; dist: number }[] {
+    const n = this.track.sampleCount;
+    const out: { lane: number; dist: number }[] = [];
+    for (const o of this.others()) {
+      if (o === this.car || !o.wrecked) continue;
+      let d = (o.trackIndex - this.car.trackIndex + n) % n;
+      if (d > n / 2) d -= n; // signed samples ahead
+      if (d < -behind || d > ahead) continue;
+      out.push({ lane: this.track.query(o.x, o.z, o.trackIndex).lateral, dist: d });
+    }
+    return out;
+  }
+
+  private wreckAheadWithin(samples: number): boolean {
+    return this.wrecksNear(samples, 0).length > 0;
+  }
+
+  /**
+   * The lane with the most room between the wrecks ahead, or null when none of them is near the lane we are on.
+   * Wrecks that overlap the way are treated together, so a cluster is passed on its open side.
+   */
+  private clearLaneAround(limit: number): number | null {
+    const wrecks = this.wrecksNear(35);
+    if (!wrecks.some((w) => Math.abs(w.lane - this.lane) < WRECK_CLEARANCE + 1.2)) return null;
+    return this.bestLane(wrecks, limit);
+  }
+
+  private bestLane(wrecks: { lane: number }[], limit: number): number | null {
+    if (!wrecks.length) return null;
+    let best = this.lane;
+    let bestScore = -Infinity;
+    for (let lane = -limit; lane <= limit; lane += 0.5) {
+      const room = Math.min(...wrecks.map((w) => Math.abs(w.lane - lane)));
+      // Room beyond what the car needs is worth little; staying close to the current lane is worth a bit.
+      const score = Math.min(room, WRECK_CLEARANCE + 1) - 0.06 * Math.abs(lane - this.lane);
+      if (score > bestScore) {
+        bestScore = score;
+        best = lane;
+      }
+    }
+    return best;
+  }
+
+  /**
+   * Detects a car that is pinned (usually nose-first against a wreck) and gets it out: reverse away turning the nose
+   * to the open side, then drive on in a clear lane. Returns true while it is controlling the car.
+   */
+  private updateStuck(dt: number, racing: boolean): boolean {
+    const { car } = this;
+    if (this.unstick > 0) {
+      this.unstick -= dt;
+      this.throttle = 0;
+      this.brake = 1; // from a standstill, braking drives the car backwards
+      this.steer = this.unstickSteer;
+      if (this.unstick <= 0) {
+        const limit = this.track.halfWidth - 2.2;
+        this.detourLane = this.bestLane(this.wrecksNear(30, 10), limit);
+        this.detourUntil = this.t + 4;
+        this.stuckTime = 0;
+      }
+      return true;
+    }
+    const pinned = racing && !this.recovering && !car.wrecked && !car.airborne && car.speed < 1.5 && this.throttle > 0.5;
+    this.stuckTime = pinned ? this.stuckTime + dt : Math.max(0, this.stuckTime - dt * 2);
+    if (this.stuckTime < 1.2) return false;
+
+    // Back away from whatever is in front, nose swinging toward the free side.
+    const fx = Math.sin(car.heading);
+    const fz = Math.cos(car.heading);
+    let blocker: Car | null = null;
+    let blockerDist = 9;
+    for (const o of this.others()) {
+      if (o === car) continue;
+      const rx = o.x - car.x;
+      const rz = o.z - car.z;
+      const dist = Math.hypot(rx, rz);
+      if (dist < blockerDist && rx * fx + rz * fz > 0) { blocker = o; blockerDist = dist; }
+    }
+    let s = Math.random() < 0.5 ? 1 : -1;
+    if (blocker) s = (blocker.x - car.x) * fz - (blocker.z - car.z) * fx || s;
+    this.unstickSteer = Math.sign(s); // reversing, steering toward the blocker swings the nose away from it
+    this.unstick = 1.0 + Math.random() * 0.5;
+    return true;
+  }
+
   /** Offset (along the track's side axis) that steers around slower cars directly ahead. */
   private avoidance(): number {
     const { car } = this;
@@ -279,16 +385,14 @@ export class AiDriver implements Controls {
     const fz = Math.cos(car.heading);
     let offset = 0;
     for (const o of this.others()) {
-      if (o === car || o.airborne || !this.onSameStretch(o)) continue;
+      if (o === car || o.wrecked || o.airborne || !this.onSameStretch(o)) continue; // wrecks: see clearLaneAround
       const rx = o.x - car.x;
       const rz = o.z - car.z;
       const g = rx * fx + rz * fz;
       const s = rx * fz - rz * fx;
-      // A wreck never moves, so give it a wider berth and notice it earlier than a car that may pull away.
-      const reach = o.wrecked ? 30 : 18;
-      if (g < 1 || g > reach || Math.abs(s) > (o.wrecked ? 3.4 : 2.8)) continue;
+      if (g < 1 || g > 18 || Math.abs(s) > 2.8) continue;
       // The car's +lateral axis points opposite to the track's side vector.
-      offset += (s >= 0 ? 1 : -1) * (o.wrecked ? 5.2 : 3.2) * (1 - g / reach);
+      offset += (s >= 0 ? 1 : -1) * 3.2 * (1 - g / 18);
     }
     // Careful drivers steer round mines lying ahead.
     this.dodging = false;

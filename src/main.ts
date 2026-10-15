@@ -221,12 +221,14 @@ function frame(now: number): void {
   acc += Math.min((now - last) / 1000, 0.1);
   pickupMsgTime = Math.max(0, pickupMsgTime - (now - last) / 1000);
   last = now;
+  weapons.locked = race.weaponsLockedFor > 0; // also here, so keys read below see the current lockout
   // Weapon keys: Z = missile, X = mine, Shift or N = nitro. Read once per frame.
   const wantMissile = input.tapped('KeyZ');
   const wantMine = input.tapped('KeyX');
   const wantRear = input.tapped('KeyB');
   const wantOil = input.tapped('KeyO');
-  const wantNitro = input.tapped('ShiftLeft') || input.tapped('ShiftRight') || input.tapped('KeyN');
+  // Read all three so none of them is left pending by the short-circuit.
+  const wantNitro = [input.tapped('ShiftLeft'), input.tapped('ShiftRight'), input.tapped('KeyN')].some(Boolean);
   if (race.state === 'racing' && !car.finished) {
     if (wantMissile) weapons.fireMissile(car);
     if (wantRear) weapons.fireMissile(car, true);
@@ -236,11 +238,12 @@ function frame(now: number): void {
   }
   while (acc >= STEP) {
     beginCollisionStep();
+    weapons.locked = race.weaponsLockedFor > 0;
     if (race.state === 'racing' && !car.finished && input.held('KeyF')) weapons.fireGun(car);
     race.update(STEP, allCars);
     car.step(STEP, controlsFor(car, input), track);
     for (const r of rivals) {
-      r.ai.update(STEP);
+      r.ai.update(STEP, race.state === 'racing');
       if (race.state === 'racing' && !r.car.finished) {
         if (r.ai.fireMissile) weapons.fireMissile(r.car);
         if (r.ai.fireRearMissile) weapons.fireMissile(r.car, true);
@@ -273,9 +276,10 @@ function frame(now: number): void {
   const lap = Math.max(1, Math.min(car.lap, race.totalLaps));
   hud.textContent =
     `P${place}/${allCars.length}   lap ${lap}/${race.totalLaps}   ${formatTime(race.time)}\n` +
-    `${(car.speed * 3.6).toFixed(0)} km/h   height ${car.y.toFixed(1)}${car.airborne ? '  AIR' : ''}${car.drifting ? `  DRIFT ${Math.round(car.driftCombo)}` : ''}${car.offroad ? '  OFFROAD' : ''}${car.nitroActive ? '  NITRO' : ''}\n` +
-    `missiles ${car.ammo.missiles}   rear ${car.ammo.rearMissiles}   mines ${car.ammo.mines}   oil ${car.ammo.oil}   nitro ${car.ammo.nitro}   gun ${car.ammo.bullets}   drift pts ${Math.round(car.driftScore)}${pickupMsgTime > 0 ? `   ${pickupMsg}` : ''}\n` +
-    `arrows/WASD drive · Space handbrake · Z missile · B rear missile · hold F gun · X mine · O oil · Shift/N nitro · C camera · R restart · ${LEVELS[levelIndex].name} AI`;
+    `${(car.speed * 3.6).toFixed(0)} km/h   height ${car.y.toFixed(1)}${car.airborne ? '  AIR' : ''}${car.drifting ? `  DRIFT ${Math.round(car.driftCombo)}` : ''}${car.offroad ? '  OFFROAD' : ''}${car.nitroActive ? '  NITRO' : ''}${car.shieldTimer > 0 ? `  SHIELD ${Math.ceil(car.shieldTimer)}s` : ''}${race.state === 'racing' && race.weaponsLockedFor > 0 ? `  WEAPONS LOCKED ${Math.ceil(race.weaponsLockedFor)}s` : ''}\n` +
+    `[Z] missile ${car.ammo.missiles} · [B] rear ${car.ammo.rearMissiles} · [F] gun ${car.ammo.bullets} · [X] mine ${car.ammo.mines} · [O] oil ${car.ammo.oil} · [Shift] nitro ${car.ammo.nitro}\n` +
+    `drift pts ${Math.round(car.driftScore)}${pickupMsgTime > 0 ? `   ${pickupMsg}` : ''}\n` +
+    `arrows/WASD drive · Space handbrake · C camera · R restart · ${LEVELS[levelIndex].name} AI`;
   updateHealthBar();
   banner.textContent = bannerText();
   requestAnimationFrame(frame);

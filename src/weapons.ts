@@ -1,13 +1,14 @@
 import * as THREE from 'three';
 import type { Car } from './car';
 import { HULL_HX, HULL_HZ } from './spec';
+import { Explosions } from './explosion';
 import type { Track } from './track';
 
 const MISSILE_SPEED = 65; // m/s over the ground
 const MISSILE_LIFE = 2.2; // seconds
 const MISSILE_OWNER_GRACE = 0.35; // the shooter cannot be hit by its own missile right away
 const MISSILE_HIT_RADIUS = 1.7;
-const MISSILE_BLAST = { radius: 6.5, power: 11, damage: 30, lift: 3 };
+const MISSILE_BLAST = { radius: 6.5, power: 11, damage: 14, lift: 3 };
 
 const GUN_RATE = 11; // shots per second
 const GUN_SPEED = 120; // m/s
@@ -16,6 +17,8 @@ const GUN_SPREAD = 0.045; // rad, half-angle of the random cone
 const GUN_DAMAGE = 1.2; // HP per bullet that hits
 const GUN_MUZZLE = { forward: 2.0, side: 0.5 };
 const MAX_BULLETS = 200;
+
+const UP = new THREE.Vector3(0, 1, 0);
 
 const OIL_RADIUS = 2.3; // a wheel inside this is on the slick
 const OIL_LIFE = 20; // seconds
@@ -28,27 +31,29 @@ const MINE_ARM_TIME = 1.0; // seconds before a dropped mine goes live (for every
 const MINE_TRIGGER_RADIUS = 1.8;
 const MINE_LIFE = 45;
 const MINE_MAX = 14; // oldest mines disappear beyond this
-const MINE_BLAST = { radius: 7.5, power: 13, damage: 36, lift: 8 };
+const MINE_BLAST = { radius: 7.5, power: 13, damage: 18, lift: 8 };
 
 export interface Missile { owner: Car; x: number; z: number; y: number; heading: number; age: number; index: number; mesh: THREE.Object3D }
-export interface Mine { owner: Car; x: number; z: number; y: number; age: number; mesh: THREE.Object3D }
+export interface Mine { owner: Car; x: number; z: number; y: number; index: number; age: number; mesh: THREE.Object3D }
 interface Bullet { owner: Car; x: number; z: number; y: number; vx: number; vz: number; age: number; index: number }
 interface Spark { mesh: THREE.Mesh; age: number; life: number; size: number }
 export interface Oil { owner: Car; x: number; z: number; y: number; age: number; mesh: THREE.Mesh }
-interface Explosion { mesh: THREE.Mesh; age: number; life: number; radius: number }
 
 /** Forward missiles, rear mines and their explosions. Ammo lives on the cars. */
 export class Weapons {
   readonly missiles: Missile[] = [];
   readonly mines: Mine[] = [];
   readonly oils: Oil[] = [];
+  /** While true every weapon refuses to fire or drop (the start-of-race lockout). Set by the game loop. */
+  locked = false;
   /** Mines and slicks as plain points, for drivers who steer around them. Rebuilt every step. */
   hazards: { x: number; z: number }[] = [];
-  private readonly explosions: Explosion[] = [];
+  private readonly fx = new Explosions();
   readonly stats = { missilesFired: 0, rearMissilesFired: 0, missileCarHits: 0, missileWallHits: 0, minesLaid: 0, mineHits: 0, oilsLaid: 0, bulletsFired: 0, bulletHits: 0 };
   private time = 0;
   private readonly bullets: Bullet[] = [];
   private readonly sparks: Spark[] = [];
+  private readonly freeSparks: THREE.Mesh[] = []; // pooled flash meshes, hidden until reused
   private readonly nextShot = new Map<Car, number>();
   private muzzleSide = 1;
   private cars: Car[] = [];
@@ -58,7 +63,6 @@ export class Weapons {
   private readonly flameMat = new THREE.MeshBasicMaterial({ color: 0xffa030, transparent: true, opacity: 0.9, depthWrite: false });
   private readonly mineBodyMat = new THREE.MeshStandardMaterial({ color: 0x2b2e33, roughness: 0.6, metalness: 0.5 });
   private readonly mineLightMat = new THREE.MeshStandardMaterial({ color: 0x500000, emissive: 0xff2010, emissiveIntensity: 1, roughness: 0.3 });
-  private readonly sphere = new THREE.SphereGeometry(1, 18, 14);
   private readonly sparkMat = new THREE.MeshBasicMaterial({ color: 0xffc040, blending: THREE.AdditiveBlending, depthWrite: false, transparent: true });
   private readonly sparkGeo = new THREE.IcosahedronGeometry(1, 0);
   private readonly tracers: THREE.InstancedMesh;
@@ -80,6 +84,7 @@ export class Weapons {
     this.tracers.frustumCulled = false;
     this.tracers.userData.noShadow = true;
     scene.add(this.tracers);
+    scene.add(this.fx.group);
   }
 
   /** Remove everything (race restart). */
@@ -88,12 +93,9 @@ export class Weapons {
     for (const m of this.mines) this.scene.remove(m.mesh);
     while (this.oils.length) this.removeOil(0);
     this.hazards = [];
-    for (const e of this.explosions) {
-      this.scene.remove(e.mesh);
-      (e.mesh.material as THREE.Material).dispose();
-    }
-    for (const s of this.sparks) this.scene.remove(s.mesh);
-    this.missiles.length = this.mines.length = this.explosions.length = this.sparks.length = this.bullets.length = 0;
+    this.fx.clear();
+    for (const s of this.sparks) this.recycleSpark(s.mesh);
+    this.missiles.length = this.mines.length = this.sparks.length = this.bullets.length = 0;
     this.nextShot.clear();
     this.tracers.count = 0;
   }
@@ -101,7 +103,7 @@ export class Weapons {
   /** Launch a missile out of the nose, or (rear = true) out of the tail, flying backwards along the car's heading. */
   fireMissile(car: Car, rear = false): boolean {
     const type = rear ? 'rearMissiles' : 'missiles';
-    if (car.wrecked || car.ammo[type] <= 0) return false;
+    if (this.locked || car.wrecked || car.ammo[type] <= 0) return false;
     car.ammo[type]--;
     this.stats.missilesFired++;
     if (rear) this.stats.rearMissilesFired++;
@@ -131,7 +133,7 @@ export class Weapons {
 
   /** Hold-to-fire machine gun: call every step while the trigger is down; the fire rate limits it. */
   fireGun(car: Car): boolean {
-    if (car.wrecked || car.airborne || car.ammo.bullets <= 0 || this.bullets.length >= MAX_BULLETS) return false;
+    if (this.locked || car.wrecked || car.airborne || car.ammo.bullets <= 0 || this.bullets.length >= MAX_BULLETS) return false;
     if (this.time < (this.nextShot.get(car) ?? 0)) return false;
     this.nextShot.set(car, this.time + 1 / GUN_RATE);
     car.ammo.bullets--;
@@ -151,7 +153,7 @@ export class Weapons {
   }
 
   dropMine(car: Car): boolean {
-    if (car.wrecked || car.airborne || car.ammo.mines <= 0) return false;
+    if (this.locked || car.wrecked || car.airborne || car.ammo.mines <= 0) return false;
     car.ammo.mines--;
     this.stats.minesLaid++;
     const fx = Math.sin(car.heading);
@@ -163,17 +165,20 @@ export class Weapons {
     const light = new THREE.Mesh(this.mineLightGeo, this.mineLightMat);
     light.position.y = 0.13;
     mesh.add(disc, light);
-    mesh.position.set(x, car.y + 0.1, z);
+    // Sit on the road surface and lie along its slope, not flat in the air or buried in a ramp.
+    const ground = this.track.query(x, z, car.trackIndex);
+    mesh.position.set(x, ground.height + 0.1, z);
+    mesh.quaternion.setFromUnitVectors(UP, this.groundNormal(x, z, ground.index));
     mesh.castShadow = mesh.receiveShadow = true;
     this.scene.add(mesh);
-    this.mines.push({ owner: car, x, z, y: car.y, age: 0, mesh });
+    this.mines.push({ owner: car, x, z, y: ground.height, index: ground.index, age: 0, mesh });
     if (this.mines.length > MINE_MAX) this.removeMine(0);
     return true;
   }
 
   /** Spill an oil slick behind the car. Any car whose wheels run over it loses most of its grip. */
   dropOil(car: Car): boolean {
-    if (car.wrecked || car.airborne || car.ammo.oil <= 0) return false;
+    if (this.locked || car.wrecked || car.airborne || car.ammo.oil <= 0) return false;
     car.ammo.oil--;
     this.stats.oilsLaid++;
     const x = car.x - Math.sin(car.heading) * 3.4;
@@ -220,7 +225,7 @@ export class Weapons {
     for (const car of cars) {
       if (car.justWrecked) {
         car.justWrecked = false;
-        this.explode(car.x, car.z, car.y + 0.6, { radius: 5, power: 0, damage: 0, lift: 0 }, 1.6);
+        this.explode(car.x, car.z, car.y + 0.6, { radius: 5, power: 0, damage: 0, lift: 0 }, 1.6, car.trackIndex);
       }
     }
 
@@ -249,7 +254,7 @@ export class Weapons {
       }
       if (hit) {
         this.removeMissile(i);
-        if (m.age <= MISSILE_LIFE) this.explode(m.x, m.z, m.y, MISSILE_BLAST, 1);
+        if (m.age <= MISSILE_LIFE) this.explode(m.x, m.z, m.y, MISSILE_BLAST, 1, m.index);
       }
     }
 
@@ -265,23 +270,11 @@ export class Weapons {
       }
       if (hit) {
         this.removeMine(i);
-        this.explode(m.x, m.z, m.y + 0.3, MINE_BLAST, 1.25);
+        this.explode(m.x, m.z, m.y + 0.3, MINE_BLAST, 1.25, m.index);
       } else if (m.age > MINE_LIFE) this.removeMine(i);
     }
 
-    for (let i = this.explosions.length - 1; i >= 0; i--) {
-      const e = this.explosions[i];
-      e.age += dt;
-      const t = e.age / e.life;
-      if (t >= 1) {
-        this.scene.remove(e.mesh);
-        (e.mesh.material as THREE.Material).dispose();
-        this.explosions.splice(i, 1);
-        continue;
-      }
-      e.mesh.scale.setScalar(Math.max(0.1, e.radius * 0.55 * Math.sqrt(t)));
-      (e.mesh.material as THREE.MeshBasicMaterial).opacity = 0.9 * (1 - t);
-    }
+    this.fx.update(dt);
   }
 
   private updateOils(dt: number, cars: Car[]): void {
@@ -368,12 +361,21 @@ export class Weapons {
 
   /** A brief flash: muzzle flashes and bullet impacts. They share one material and shrink away. */
   private spark(x: number, y: number, z: number, size: number, life: number): void {
-    const mesh = new THREE.Mesh(this.sparkGeo, this.sparkMat);
+    let mesh = this.freeSparks.pop();
+    if (!mesh) {
+      mesh = new THREE.Mesh(this.sparkGeo, this.sparkMat);
+      mesh.userData.noShadow = true;
+      this.scene.add(mesh);
+    }
+    mesh.visible = true;
     mesh.position.set(x, y, z);
     mesh.scale.setScalar(size);
-    mesh.userData.noShadow = true;
-    this.scene.add(mesh);
     this.sparks.push({ mesh, age: 0, life, size });
+  }
+
+  private recycleSpark(mesh: THREE.Mesh): void {
+    mesh.visible = false;
+    this.freeSparks.push(mesh);
   }
 
   private updateSparks(dt: number): void {
@@ -381,7 +383,7 @@ export class Weapons {
       const s = this.sparks[i];
       s.age += dt;
       if (s.age >= s.life) {
-        this.scene.remove(s.mesh);
+        this.recycleSpark(s.mesh);
         this.sparks.splice(i, 1);
       } else {
         s.mesh.scale.setScalar(Math.max(0.01, s.size * (1 - s.age / s.life)));
@@ -389,12 +391,18 @@ export class Weapons {
     }
   }
 
-  private explode(x: number, z: number, y: number, blast: typeof MISSILE_BLAST, size: number): void {
-    const mat = new THREE.MeshBasicMaterial({ color: 0xffa23a, transparent: true, opacity: 0.9, depthWrite: false, blending: THREE.AdditiveBlending });
-    const mesh = new THREE.Mesh(this.sphere, mat);
-    mesh.position.set(x, y, z);
-    this.scene.add(mesh);
-    this.explosions.push({ mesh, age: 0, life: 0.55, radius: blast.radius * size });
+  /** Unit normal of the road surface at (x, z), from the height gradient around it. `index` picks the right strand at the crossing. */
+  private groundNormal(x: number, z: number, index: number): THREE.Vector3 {
+    const d = 0.8;
+    const h = (px: number, pz: number) => this.track.query(px, pz, index).height;
+    const dhdx = (h(x + d, z) - h(x - d, z)) / (2 * d);
+    const dhdz = (h(x, z + d) - h(x, z - d)) / (2 * d);
+    return new THREE.Vector3(-dhdx, 1, -dhdz).normalize();
+  }
+
+  private explode(x: number, z: number, y: number, blast: typeof MISSILE_BLAST, size: number, index: number): void {
+    const ground = this.track.query(x, z, index);
+    this.fx.spawn(x, Math.max(y, ground.height + 0.5), z, blast.radius * size, ground.height, this.groundNormal(x, z, ground.index));
     if (blast.power > 0) for (const c of this.cars) c.applyBlast(x, z, blast.radius, blast.power, blast.damage, blast.lift);
   }
 

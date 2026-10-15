@@ -6,6 +6,7 @@ export type RaceState = 'menu' | 'countdown' | 'racing';
 export class Race {
   state: RaceState = 'menu';
   readonly totalLaps = 3;
+  readonly weaponsDelay = 10; // seconds into the race before any weapon can be used
   countdown = 0;
   time = 0;
   finishOrder: Car[] = [];
@@ -20,6 +21,11 @@ export class Race {
   toMenu(): void {
     this.state = 'menu';
     this.finishOrder = [];
+  }
+
+  /** Seconds of the weapons lockout left (0 once armed; the full delay before the race starts). */
+  get weaponsLockedFor(): number {
+    return this.state === 'racing' ? Math.max(0, this.weaponsDelay - this.time) : this.weaponsDelay;
   }
 
   /** Call once per physics step. */

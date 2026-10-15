@@ -2,25 +2,26 @@ import * as THREE from 'three';
 import type { Car } from './car';
 import type { Track } from './track';
 
-export type PickupKind = 'ammo' | 'nitro' | 'repair' | 'gun' | 'rear' | 'oil';
+export type PickupKind = 'ammo' | 'nitro' | 'repair' | 'gun' | 'rear' | 'oil' | 'shield';
 
-const SPOT_COUNT = 20;
+const SPOT_COUNT = 16;
 const SPOT_LANES = [4.5, -4.5, 0, 4, -4, 1.5, -1.5]; // metres from the centreline, cycled along the lap
-const RESPAWN_TIME = 20; // seconds after being taken
+const RESPAWN_TIME = 40; // seconds after being taken
 const COLLECT_RADIUS = 1.9;
 const COLLECT_HEIGHT = 1.8;
-const KIND_WEIGHTS: [PickupKind, number][] = [['ammo', 0.22], ['nitro', 0.18], ['repair', 0.18], ['gun', 0.17], ['rear', 0.13], ['oil', 0.12]];
+const KIND_WEIGHTS: [PickupKind, number][] = [['ammo', 0.17], ['nitro', 0.13], ['repair', 0.23], ['gun', 0.13], ['rear', 0.12], ['oil', 0.11], ['shield', 0.11]];
 
 /** What each kind gives. */
 const AMMO_GIFT = { missiles: 3, mines: 3 };
 const NITRO_GIFT = 1;
-const REPAIR_GIFT = 35;
+const REPAIR_GIFT = 45;
 const GUN_GIFT = 60;
 const REAR_GIFT = 3;
 const OIL_GIFT = 2;
+const SHIELD_GIFT = 8; // seconds
 
 /** Map-marker colours for the minimap. */
-export const PICKUP_COLOURS: Record<PickupKind, string> = { ammo: '#e0c030', nitro: '#3f9bff', repair: '#ffffff', gun: '#ff8a30', rear: '#ff4a4a', oil: '#a070ff' };
+export const PICKUP_COLOURS: Record<PickupKind, string> = { ammo: '#e0c030', nitro: '#3f9bff', repair: '#ffffff', gun: '#ff8a30', rear: '#ff4a4a', oil: '#a070ff', shield: '#40e0d0' };
 
 export interface PickupSpot {
   readonly x: number;
@@ -41,6 +42,7 @@ export function canUse(car: Car, kind: PickupKind): boolean {
   if (kind === 'gun') return car.ammoRoom('bullets') > 0;
   if (kind === 'rear') return car.ammoRoom('rearMissiles') > 0;
   if (kind === 'oil') return car.ammoRoom('oil') > 0;
+  if (kind === 'shield') return car.shieldTimer < 4;
   return car.health < 100;
 }
 
@@ -52,6 +54,7 @@ export function worthChasing(car: Car, kind: PickupKind): boolean {
   if (kind === 'gun') return car.ammoRoom('bullets') >= 40;
   if (kind === 'rear') return car.ammoRoom('rearMissiles') >= 2;
   if (kind === 'oil') return car.ammoRoom('oil') >= 2;
+  if (kind === 'shield') return car.shieldTimer <= 0;
   return true;
 }
 
@@ -65,6 +68,9 @@ function apply(car: Car, kind: PickupKind): string | null {
     if (n) parts.push(`+${n} mine${n > 1 ? 's' : ''}`);
   } else if (kind === 'nitro') {
     if (car.give('nitro', NITRO_GIFT)) parts.push('+1 nitro');
+  } else if (kind === 'shield') {
+    const s = car.giveShield(SHIELD_GIFT);
+    if (s) parts.push(`shield ${Math.round(s)}s`);
   } else if (kind === 'oil') {
     const o = car.give('oil', OIL_GIFT);
     if (o) parts.push(`+${o} oil`);
@@ -144,6 +150,7 @@ export class Pickups {
         gun: shared.gun(),
         rear: shared.rear(),
         oil: shared.oil(),
+        shield: shared.shield(),
       };
       for (const m of Object.values(models)) holder.add(m);
       const pad = shared.pad();
@@ -237,6 +244,9 @@ export class Pickups {
     const rearPodGeo = box(1.0, 0.45, 0.8);
     const rocketGeo = new THREE.ConeGeometry(0.15, 0.55, 8).rotateX(-Math.PI / 2);
     const redMat2 = std(0xd83a3a);
+    const orbGeo = new THREE.IcosahedronGeometry(0.5, 1);
+    const orbMat = std(0x40e0d0, { metalness: 0.2, emissive: 0x1a8a80, emissiveIntensity: 0.8 });
+    const ringGeo = new THREE.TorusGeometry(0.62, 0.05, 6, 20).rotateX(Math.PI / 2);
     const drumGeo = new THREE.CylinderGeometry(0.4, 0.4, 0.8, 12);
     const drumBandGeo = new THREE.CylinderGeometry(0.42, 0.42, 0.14, 12);
     const drumMat = std(0x16161a, { metalness: 0.4 });
@@ -249,6 +259,7 @@ export class Pickups {
       gun: new THREE.MeshBasicMaterial({ color: 0xff8a30, transparent: true, opacity: 0.35, depthWrite: false }),
       rear: new THREE.MeshBasicMaterial({ color: 0xff4a4a, transparent: true, opacity: 0.35, depthWrite: false }),
       oil: new THREE.MeshBasicMaterial({ color: 0xa070ff, transparent: true, opacity: 0.35, depthWrite: false }),
+      shield: new THREE.MeshBasicMaterial({ color: 0x40e0d0, transparent: true, opacity: 0.35, depthWrite: false }),
     };
     const mesh = (geo: THREE.BufferGeometry, mat: THREE.Material, y = 0) => {
       const m = new THREE.Mesh(geo, mat);
@@ -280,6 +291,12 @@ export class Pickups {
           round.position.x = x;
           g.add(round);
         }
+        return g;
+      },
+      // Glowing teal orb inside a ring.
+      shield: () => {
+        const g = new THREE.Group();
+        g.add(mesh(orbGeo, orbMat), mesh(ringGeo, steelMat));
         return g;
       },
       // Black oil drum with a yellow band.

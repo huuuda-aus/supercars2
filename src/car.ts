@@ -25,7 +25,8 @@ const NITRO_ACCEL = 1.7; // acceleration multiplier while it burns
 const LAND_SKID_SPEED = 6;
 const LAND_SKID_FULL = 20;
 const LAND_SKID_TIME = 0.4;
-const WRECK_DECEL = 3; // 1/s, how fast a destroyed car's leftover motion dies away
+const WRECK_DECEL = 0.5; // 1/s, viscous part of how fast a destroyed car's leftover motion dies away
+const WRECK_FRICTION = 12; // m/s^2 of dry scraping: with the wreck mass this out-pulls a car's engine, so pushing slowly does nothing
 export const START_LOADOUT = { missiles: 5, mines: 5, nitro: 3, bullets: 100, rearMissiles: 3, oil: 3 };
 export type AmmoType = keyof typeof START_LOADOUT;
 /** Most a car can carry of each; pickups top up to this. */
@@ -68,6 +69,8 @@ const DRIFT_GRACE = 0.6; // seconds a drift may be interrupted before the combo 
 /** Driving over an oil slick: tyre grip multiplier, and how much of the braking and drive force still gets to the road. */
 const OIL_GRIP = 0.15;
 const OIL_TRACTION = 0.45;
+
+const SHIELD_MAX = 12; // seconds of shield a car can hold
 
 const WHEEL_SIGNS: [number, number][] = [[1, 1], [-1, 1], [1, -1], [-1, -1]]; // FL, FR, RL, RR (x sign, z sign)
 
@@ -121,12 +124,14 @@ export class Car {
   justWrecked = false; // set when destroyed; the weapons system turns it into an explosion
   nitroTimer = 0;
   private readonly wreck: Wreck;
+  private readonly shield: THREE.Mesh;
   private readonly intactParts: THREE.Object3D[];
 
   private steerState = 0;
   private handbrakeState = 0;
   private driftGap = 0; // time since the last drifting step
   drifting = false;
+  shieldTimer = 0; // while above zero the car takes no damage (pushes and blasts still move it)
   oilTimer = 0; // seconds of slippery tyres left; refreshed by the weapons system while a wheel is on a slick
   landSkid = 0; // seconds of tyre scrub left after touching down hard (read by the skidmarks)
   landStrength = 0; // 0..1, how hard the touchdown was
@@ -154,6 +159,15 @@ export class Car {
     this.wreck = buildWreck();
     this.wreck.group.visible = false;
     this.mesh.add(this.wreck.group);
+    // A translucent bubble around the car while the shield is up.
+    this.shield = new THREE.Mesh(
+      new THREE.SphereGeometry(1.4, 16, 12).scale(1.05, 0.8, 1.9),
+      new THREE.MeshBasicMaterial({ color: 0x55d0ff, transparent: true, opacity: 0.25, depthWrite: false }),
+    );
+    this.shield.position.y = 0.7;
+    this.shield.visible = false;
+    this.shield.userData.noShadow = true;
+    this.mesh.add(this.shield);
   }
 
   placeOnTrack(track: Track, index: number, lateral = 0): void {
@@ -188,6 +202,7 @@ export class Car {
     this.wrecked = false;
     this.justWrecked = false;
     this.nitroTimer = 0;
+    this.shieldTimer = 0;
     this.showWreck(false);
   }
 
@@ -240,6 +255,14 @@ export class Car {
     return restored;
   }
 
+  /** Raise the shield for `seconds` more (capped). Returns how much was added. */
+  giveShield(seconds: number): number {
+    if (this.wrecked) return 0;
+    const added = Math.max(0, Math.min(seconds, SHIELD_MAX - this.shieldTimer));
+    this.shieldTimer += added;
+    return added;
+  }
+
   /** Fire one nitro charge. Returns false if there is none left or one is already burning. */
   useNitro(): boolean {
     if (this.wrecked || this.ammo.nitro <= 0 || this.nitroTimer > 0) return false;
@@ -254,7 +277,7 @@ export class Car {
   get nitroActive(): boolean { return this.nitroTimer > 0; }
 
   damage(amount: number): void {
-    if (this.wrecked) return;
+    if (this.wrecked || this.shieldTimer > 0) return;
     this.health -= amount;
     if (this.health <= 0) {
       this.health = 0;
@@ -332,6 +355,7 @@ export class Car {
   step(dt: number, input: Controls, track: Track): void {
     if (this.nitroTimer > 0) this.nitroTimer = Math.max(0, this.nitroTimer - dt);
     this.landSkid = Math.max(0, this.landSkid - dt);
+    this.shieldTimer = Math.max(0, this.shieldTimer - dt);
     this.oilTimer = Math.max(0, this.oilTimer - dt);
     if (this.wrecked) this.wreck.update(dt);
 
@@ -439,7 +463,14 @@ export class Car {
     this.vf *= k;
     this.vl *= k;
     this.omega *= k;
-    if (this.speed < 0.05) this.vf = this.vl = this.omega = 0;
+    const speed = this.speed;
+    if (speed < WRECK_FRICTION * dt + 0.05) {
+      this.vf = this.vl = this.omega = 0;
+    } else {
+      const scale = 1 - (WRECK_FRICTION * dt) / speed;
+      this.vf *= scale;
+      this.vl *= scale;
+    }
   }
 
   /** Engine, brakes, drag and the two tyre axles; updates body-frame velocity and yaw rate. */
@@ -502,6 +533,10 @@ export class Car {
     this.mesh.rotation.x = -this.pitch; // +z is forward, so a positive x rotation would lower the nose
     for (const p of this.frontPivots) p.rotation.y = this.steerState * 0.45;
     for (const w of this.spinners) w.rotation.x = this.wheelAngle;
+    // The bubble pulses, and flickers in its last two seconds as a warning.
+    const shielded = this.shieldTimer > 0 && !this.wrecked;
+    this.shield.visible = shielded && (this.shieldTimer > 2 || Math.floor(this.shieldTimer * 8) % 2 === 0);
+    if (shielded) (this.shield.material as THREE.MeshBasicMaterial).opacity = 0.2 + 0.08 * Math.sin(this.shieldTimer * 9);
     const burning = this.nitroTimer > 0;
     for (const f of this.flames) {
       f.visible = burning;
