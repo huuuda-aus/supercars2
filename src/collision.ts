@@ -12,6 +12,35 @@ const CONTACT_SOFTNESS = 0.25;
 const CAR_PUSH_OUT = 0.3;
 const MAX_IMPACT_YAW = 5; // rad/s
 
+// Damage per m/s of impact speed (closing speed along the contact normal when the contact starts or gets harder).
+const WALL_DAMAGE = 1.4; // a 20 m/s wall hit costs about 28 HP
+const CAR_DAMAGE = 1.1; // each car takes this per m/s of speed difference along the contact normal
+/** Closing speed that is free: engine push, leaning on a wall or nose-to-tail shoving never gets above this. */
+const MIN_IMPACT_SPEED = 1.0;
+
+/**
+ * Contacts are soft (a hit plays out over several steps and a car pushing on another keeps re-creating a small
+ * closing speed), so damage cannot come from the closing speed of each step. Instead each contact remembers its
+ * closing speed from the previous step and only an increase over that (and over MIN_IMPACT_SPEED) counts: a fresh
+ * hit is charged in full on its first step, steady pushing is free.
+ */
+let tick = 0;
+const lastClosing = new WeakMap<Car, Map<Car | null, { speed: number; tick: number }>>();
+
+/** Call once at the start of every physics step. */
+export function beginCollisionStep(): void {
+  tick++;
+}
+
+function impactSpeed(car: Car, other: Car | null, closing: number): number {
+  let contacts = lastClosing.get(car);
+  if (!contacts) lastClosing.set(car, (contacts = new Map()));
+  const rec = contacts.get(other);
+  const previous = rec && tick - rec.tick <= 1 ? rec.speed : 0;
+  contacts.set(other, { speed: closing, tick });
+  return Math.max(0, closing - Math.max(previous, MIN_IMPACT_SPEED));
+}
+
 const CAR_RESTITUTION = 0.05;
 const CAR_FRICTION = 0.2;
 const WALL_RESTITUTION = 0.05;
@@ -75,6 +104,14 @@ function resolveContact(a: Car, b: Car | null, p: Vec, n: Vec, restitution: numb
   const jn = (-(1 + restitution) * vn * CONTACT_SOFTNESS) / inverseMass(n);
   push({ x: n.x * jn, z: n.z * jn });
 
+  // Both cars (or the one against a wall or wreck) are hurt in proportion to the impact speed.
+  const impact = impactSpeed(a, b, -vn);
+  if (impact > 0) {
+    const hurt = impact * (b ? CAR_DAMAGE : WALL_DAMAGE);
+    a.damage(hurt);
+    b?.damage(hurt);
+  }
+
   // Coulomb friction on the tangential slip, limited by the normal impulse.
   const v = relVel();
   const vn2 = v.x * n.x + v.z * n.z;
@@ -89,7 +126,7 @@ function resolveContact(a: Car, b: Car | null, p: Vec, n: Vec, restitution: numb
 
 /** Car-vs-car: SAT on the two oriented footprints, then contact point, positional fix and impulses. */
 export function collideCars(a: Car, b: Car): void {
-  if (a.wrecked || b.wrecked) return;
+  if (a.wrecked && b.wrecked) return;
   if (Math.abs(a.y - b.y) > 1.5) return;
   if ((a.x - b.x) ** 2 + (a.z - b.z) ** 2 > 36) return;
 
@@ -129,6 +166,16 @@ export function collideCars(a: Car, b: Car): void {
     x: deep.reduce((s, c) => s + c.x, 0) / deep.length,
     z: deep.reduce((s, c) => s + c.z, 0) / deep.length,
   };
+
+  // A wreck is an immovable obstacle: the other car is pushed fully out and bounces off it like a wall.
+  if (a.wrecked || b.wrecked) {
+    const live = a.wrecked ? b : a;
+    const toWreck = a.wrecked ? { x: -n.x, z: -n.z } : n;
+    live.x -= toWreck.x * depth;
+    live.z -= toWreck.z * depth;
+    resolveContact(live, null, p, toWreck, WALL_RESTITUTION, WALL_FRICTION);
+    return;
+  }
 
   const push = (depth * CAR_PUSH_OUT) / 2;
   a.x -= n.x * push;

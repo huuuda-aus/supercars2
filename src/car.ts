@@ -4,6 +4,7 @@ import { collideWalls } from './collision';
 import type { Controls } from './input';
 import { HULL_HX, HULL_HZ, INERTIA, WHEEL_R, WHEEL_X, WHEEL_Z } from './spec';
 import type { Track } from './track';
+import { buildWreck, type Wreck } from './wreck';
 
 const GRAVITY = 78; // 30 originally, 90 after first tuning; now 20% of the way back
 export const ACCEL = 28;
@@ -20,8 +21,11 @@ const AIR_YAW_DAMPING = 3; // 1/s, how fast leftover spin fades while airborne
 const NITRO_TIME = 1.8; // seconds one charge burns
 const NITRO_SPEED = 1.4; // top speed multiplier while it burns
 const NITRO_ACCEL = 1.7; // acceleration multiplier while it burns
-const WRECK_TIME = 2.5; // seconds a destroyed car is out before it is put back on the road
-const RESPAWN_HEALTH = 60;
+/** Landing harder than this (m/s of vertical speed relative to the road) leaves tyre marks. */
+const LAND_SKID_SPEED = 6;
+const LAND_SKID_FULL = 20;
+const LAND_SKID_TIME = 0.4;
+const WRECK_DECEL = 3; // 1/s, how fast a destroyed car's leftover motion dies away
 export const START_LOADOUT = { missiles: 5, mines: 5, nitro: 3 };
 const STEER_RAMP = 6; // steering input slew (1/s), so a tap is a gentle turn and a hold is a sharp one
 const MAX_STEER_ANGLE = 0.42; // front wheel lock (rad)
@@ -45,6 +49,18 @@ const REAR_GRIP_BIAS = 1.15; // rear axle grips a bit more than the front, so th
 /** Steering lock shrinks with speed so the front axle stays near its grip peak: lock <= base + L*a/u^2. */
 const LOCK_BASE = 0.07;
 const LOCK_SPEED_TERM = 90;
+
+/** Handbrake: locks the rear wheels. The rear axle loses most of its grip (so the tail swings out) and slows the car. */
+const HANDBRAKE_GRIP_LOSS = 0.6;
+const HANDBRAKE_DECEL = 3; // m/s^2 of rear-wheel braking at full pull
+const HANDBRAKE_RAMP = 10; // 1/s, how fast the pull builds and releases
+/** A slide counts as a drift past this body slip angle (rad) and speed (m/s). */
+/** Past this slip angle the car is turned too far sideways to hold a drift: extra yaw damping (1/s per rad over) pulls it back. */
+const DRIFT_STABILIZE_FROM = 0.5;
+const DRIFT_STABILIZE = 5;
+const DRIFT_ANGLE = 0.3;
+const DRIFT_MIN_SPEED = 9;
+const DRIFT_GRACE = 0.6; // seconds a drift may be interrupted before the combo is banked
 
 const WHEEL_SIGNS: [number, number][] = [[1, 1], [-1, 1], [1, -1], [-1, -1]]; // FL, FR, RL, RR (x sign, z sign)
 
@@ -94,13 +110,20 @@ export class Car {
   // Weapons, damage and nitro.
   ammo = { ...START_LOADOUT };
   health = 100;
-  wrecked = false;
+  wrecked = false; // destroyed for good: stays on the track as a smoking hulk until the race is reset
   justWrecked = false; // set when destroyed; the weapons system turns it into an explosion
   nitroTimer = 0;
-  private wreckTimer = 0;
-  private invulnerable = 0;
+  private readonly wreck: Wreck;
+  private readonly intactParts: THREE.Object3D[];
 
   private steerState = 0;
+  private handbrakeState = 0;
+  private driftGap = 0; // time since the last drifting step
+  drifting = false;
+  landSkid = 0; // seconds of tyre scrub left after touching down hard (read by the skidmarks)
+  landStrength = 0; // 0..1, how hard the touchdown was
+  driftCombo = 0; // score of the drift in progress
+  driftScore = 0; // banked this race
   private pitch = 0; // visual only
   private readonly frontPivots: THREE.Group[];
   private readonly spinners: THREE.Object3D[];
@@ -119,6 +142,10 @@ export class Car {
     this.spinners = model.spinners;
     this.flames = model.flames;
     this.mesh.rotation.order = 'YXZ';
+    this.intactParts = [...this.mesh.children];
+    this.wreck = buildWreck();
+    this.wreck.group.visible = false;
+    this.mesh.add(this.wreck.group);
   }
 
   placeOnTrack(track: Track, index: number, lateral = 0): void {
@@ -136,6 +163,11 @@ export class Car {
     this.vf = this.vl = this.vy = this.omega = 0;
     this.breakaway = 0;
     this.steerState = 0;
+    this.handbrakeState = 0;
+    this.landSkid = 0;
+    this.drifting = false;
+    this.driftGap = 0;
+    this.driftCombo = this.driftScore = 0;
     this.airborne = false;
     this.resetLoadout();
     this.syncMesh();
@@ -147,9 +179,12 @@ export class Car {
     this.wrecked = false;
     this.justWrecked = false;
     this.nitroTimer = 0;
-    this.wreckTimer = 0;
-    this.invulnerable = 0;
-    this.mesh.visible = true;
+    this.showWreck(false);
+  }
+
+  private showWreck(on: boolean): void {
+    for (const part of this.intactParts) part.visible = !on;
+    this.wreck.group.visible = on;
   }
 
   /** Put the car back on the road before the jump (after falling into the pit), keeping lap progress. */
@@ -167,20 +202,12 @@ export class Car {
     this.trackIndex = index;
     this.vf = this.vl = this.vy = this.omega = 0;
     this.steerState = 0;
+    this.handbrakeState = 0;
+    this.landSkid = 0;
     this.breakaway = 0;
     this.lastImpact = 0;
     this.airborne = false;
     this.syncMesh();
-  }
-
-  /** After a wreck: back on the road where it happened (or before the jump if that was in it), half repaired. */
-  private recoverFromWreck(track: Track): void {
-    const inJump = this.trackIndex >= track.gapFrom - 25 && this.trackIndex <= track.gapTo + 25;
-    this.respawnAt(track, inJump ? track.respawnIndex : this.trackIndex);
-    this.wrecked = false;
-    this.health = RESPAWN_HEALTH;
-    this.invulnerable = 2;
-    this.mesh.visible = true;
   }
 
   /** Fire one nitro charge. Returns false if there is none left or one is already burning. */
@@ -191,18 +218,20 @@ export class Car {
     return true;
   }
 
+  /** 0..1, how far the handbrake is pulled. */
+  get handbrakePull(): number { return this.handbrakeState; }
+
   get nitroActive(): boolean { return this.nitroTimer > 0; }
 
   damage(amount: number): void {
-    if (this.wrecked || this.invulnerable > 0) return;
+    if (this.wrecked) return;
     this.health -= amount;
     if (this.health <= 0) {
       this.health = 0;
       this.wrecked = true;
       this.justWrecked = true;
-      this.wreckTimer = WRECK_TIME;
       this.nitroTimer = 0;
-      this.mesh.visible = false;
+      this.showWreck(true);
     }
   }
 
@@ -271,20 +300,17 @@ export class Car {
   }
 
   step(dt: number, input: Controls, track: Track): void {
-    this.invulnerable = Math.max(0, this.invulnerable - dt);
     if (this.nitroTimer > 0) this.nitroTimer = Math.max(0, this.nitroTimer - dt);
-    if (this.wrecked) {
-      this.wreckTimer -= dt;
-      if (this.wreckTimer <= 0) this.recoverFromWreck(track);
-      return;
-    }
+    this.landSkid = Math.max(0, this.landSkid - dt);
+    if (this.wrecked) this.wreck.update(dt);
 
     const q = track.query(this.x, this.z, this.trackIndex);
     this.offroad = Math.abs(q.lateral) > track.halfWidth;
     this.trackIndex = q.index;
 
-    // Checkpoints must be passed in order; crossing checkpoint 0 completes a lap.
-    if (track.inCheckpoint(this.trackIndex, this.nextCheckpoint)) {
+    // Checkpoints must be passed in order; crossing checkpoint 0 completes a lap. A wreck sliding over the
+    // line does not count.
+    if (!this.wrecked && track.inCheckpoint(this.trackIndex, this.nextCheckpoint)) {
       if (this.nextCheckpoint === 0) this.lap++;
       this.nextCheckpoint = (this.nextCheckpoint + 1) % track.checkpointCount;
     }
@@ -293,8 +319,11 @@ export class Car {
     // world (the body-frame components would rotate with the car and bend the flight path), and any spin
     // carried off the lip dies away quickly instead of turning the car round.
     const airVelocity = this.airborne ? this.worldVelocity() : null;
-    if (!this.airborne) this.drive(dt, input);
-    else this.omega *= Math.exp(-AIR_YAW_DAMPING * dt);
+    if (this.airborne) this.omega *= Math.exp(-AIR_YAW_DAMPING * dt);
+    else if (this.wrecked) this.slideToStop(dt);
+    else this.drive(dt, input);
+
+    this.updateDrift(dt);
 
     this.heading += this.omega * dt;
     if (airVelocity) this.setWorldVelocity(airVelocity.x, airVelocity.z);
@@ -307,21 +336,34 @@ export class Car {
     // Vertical: free fall, snap to the ground, inherit the slope's vertical speed on contact.
     const gq = track.query(this.x, this.z, this.trackIndex);
     const ground = gq.gap ? track.pitFloor : gq.height;
-    if (!gq.gap && this.airborne && this.y < ground - CLIFF_HEIGHT) {
+    if (!this.wrecked && !gq.gap && this.airborne && this.y < ground - CLIFF_HEIGHT) {
       this.respawn(track); // arrived far below the landing ramp and hit its face
       return;
     }
     this.vy -= GRAVITY * dt;
     this.y += this.vy * dt;
     if (gq.gap && this.y <= track.pitFloor + 0.05) {
-      this.respawn(track); // dropped into the pit
-      return;
+      if (!this.wrecked) {
+        this.respawn(track); // dropped into the pit
+        return;
+      }
+      // A wreck stays where it fell.
+      this.y = track.pitFloor + 0.05;
+      this.vy = 0;
+      this.vf = this.vl = this.omega = 0;
+      this.airborne = false;
     }
     if (this.y <= ground) {
       this.y = ground;
       const t = track.samples[gq.index].tangent;
       const v = this.worldVelocity();
-      this.vy = gq.slope * (v.x * t.x + v.z * t.z);
+      const roadVy = gq.slope * (v.x * t.x + v.z * t.z);
+      const impact = roadVy - this.vy; // how fast we came down onto the road
+      if (this.airborne && !this.wrecked && impact > LAND_SKID_SPEED) {
+        this.landSkid = LAND_SKID_TIME;
+        this.landStrength = Math.min(1, (impact - LAND_SKID_SPEED) / (LAND_SKID_FULL - LAND_SKID_SPEED));
+      }
+      this.vy = roadVy;
       this.airborne = false;
     } else {
       this.airborne = this.y - ground > 0.15;
@@ -341,6 +383,32 @@ export class Car {
     this.wheelAngle += (this.vf * dt) / WHEEL_R;
 
     this.syncMesh();
+  }
+
+  /** Detect a drift (a sustained slide at speed) and score it; the combo is banked a moment after the slide ends. */
+  private updateDrift(dt: number): void {
+    const slip = Math.abs(Math.atan2(this.vl, Math.max(Math.abs(this.vf), 1)));
+    this.drifting = !this.wrecked && !this.airborne && this.speed > DRIFT_MIN_SPEED && slip > DRIFT_ANGLE;
+    if (this.drifting) {
+      this.driftGap = 0;
+      // Faster and sideways-er pays more.
+      this.driftCombo += this.speed * Math.min(slip, 1.2) * dt * 4;
+    } else if (this.driftCombo > 0) {
+      this.driftGap += dt;
+      if (this.wrecked || this.driftGap > DRIFT_GRACE) {
+        if (!this.wrecked) this.driftScore += this.driftCombo;
+        this.driftCombo = 0; // a crash or wreck loses the combo
+      }
+    }
+  }
+
+  /** A destroyed car just skids to a halt. */
+  private slideToStop(dt: number): void {
+    const k = Math.exp(-WRECK_DECEL * dt);
+    this.vf *= k;
+    this.vl *= k;
+    this.omega *= k;
+    if (this.speed < 0.05) this.vf = this.vl = this.omega = 0;
   }
 
   /** Engine, brakes, drag and the two tyre axles; updates body-frame velocity and yaw rate. */
@@ -375,16 +443,23 @@ export class Car {
     const fFront = tyreForce(u, v + WHEEL_Z * w, delta, grip);
     this.breakaway = Math.max(0, this.breakaway - dt);
     const looseness = 1 - BREAKAWAY_GRIP_LOSS * Math.min(1, this.breakaway / 0.4);
-    const fRear = tyreForce(u, v - WHEEL_Z * w, 0, grip * REAR_GRIP_BIAS * looseness);
+    const pull = Math.sign(input.handbrake - this.handbrakeState) * Math.min(Math.abs(input.handbrake - this.handbrakeState), HANDBRAKE_RAMP * dt);
+    this.handbrakeState += pull;
+    const hbGrip = 1 - HANDBRAKE_GRIP_LOSS * this.handbrakeState;
+    const fRear = tyreForce(u, v - WHEEL_Z * w, 0, grip * REAR_GRIP_BIAS * looseness * hbGrip);
     const axFront = ax / 2; // drive force of the front axle, along the wheels
     const fxFront = axFront * Math.cos(delta) - fFront * Math.sin(delta);
     const fyFront = axFront * Math.sin(delta) + fFront * Math.cos(delta);
-    const fxRear = ax / 2;
+    // Locked rear wheels deliver no drive; they brake instead.
+    const hbBrake = Math.min(HANDBRAKE_DECEL * this.handbrakeState, Math.abs(u) / dt) * Math.sign(u);
+    const fxRear = ax / 2 * (1 - this.handbrakeState) - hbBrake;
 
     this.vf = u + (fxRear + fxFront + v * w) * dt;
     this.vl = v + (fyFront + fRear - u * w) * dt;
     this.omega = w + ((WHEEL_Z * fyFront - WHEEL_Z * fRear) / INERTIA) * dt;
     this.omega *= Math.exp(-YAW_DAMPING * dt);
+    const slip = Math.abs(Math.atan2(this.vl, Math.max(Math.abs(this.vf), 1)));
+    if (slip > DRIFT_STABILIZE_FROM) this.omega *= Math.exp(-DRIFT_STABILIZE * (slip - DRIFT_STABILIZE_FROM) * dt);
     this.vf *= Math.max(0, 1 - TURN_DECEL * Math.abs(this.omega) * dt);
   }
 

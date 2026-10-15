@@ -33,6 +33,13 @@ export class Weapons {
   private readonly mineBodyMat = new THREE.MeshStandardMaterial({ color: 0x2b2e33, roughness: 0.6, metalness: 0.5 });
   private readonly mineLightMat = new THREE.MeshStandardMaterial({ color: 0x500000, emissive: 0xff2010, emissiveIntensity: 1, roughness: 0.3 });
   private readonly sphere = new THREE.SphereGeometry(1, 18, 14);
+  // Shared by every missile and mine, so firing does not allocate GPU geometry.
+  private readonly missileBodyGeo = new THREE.CylinderGeometry(0.13, 0.13, 1.3, 10).rotateX(Math.PI / 2);
+  private readonly missileNoseGeo = new THREE.ConeGeometry(0.13, 0.45, 10).rotateX(Math.PI / 2).translate(0, 0, 0.85);
+  private readonly missileFlameGeo = new THREE.ConeGeometry(0.11, 0.9, 8).rotateX(-Math.PI / 2).translate(0, 0, -1.1);
+  private readonly missileFinGeo = new THREE.BoxGeometry(0.03, 0.3, 0.3);
+  private readonly mineDiscGeo = new THREE.CylinderGeometry(0.6, 0.7, 0.2, 18);
+  private readonly mineLightGeo = new THREE.CylinderGeometry(0.16, 0.16, 0.08, 10);
 
   constructor(private readonly scene: THREE.Scene, private readonly track: Track) {}
 
@@ -40,7 +47,10 @@ export class Weapons {
   clear(): void {
     for (const m of this.missiles) this.scene.remove(m.mesh);
     for (const m of this.mines) this.scene.remove(m.mesh);
-    for (const e of this.explosions) this.scene.remove(e.mesh);
+    for (const e of this.explosions) {
+      this.scene.remove(e.mesh);
+      (e.mesh.material as THREE.Material).dispose();
+    }
     this.missiles.length = this.mines.length = this.explosions.length = 0;
   }
 
@@ -51,11 +61,11 @@ export class Weapons {
     const fx = Math.sin(car.heading);
     const fz = Math.cos(car.heading);
     const mesh = new THREE.Group();
-    const body = new THREE.Mesh(new THREE.CylinderGeometry(0.13, 0.13, 1.3, 10).rotateX(Math.PI / 2), this.missileMat);
-    const nose = new THREE.Mesh(new THREE.ConeGeometry(0.13, 0.45, 10).rotateX(Math.PI / 2).translate(0, 0, 0.85), this.noseMat);
-    const flame = new THREE.Mesh(new THREE.ConeGeometry(0.11, 0.9, 8).rotateX(-Math.PI / 2).translate(0, 0, -1.1), this.flameMat);
+    const body = new THREE.Mesh(this.missileBodyGeo, this.missileMat);
+    const nose = new THREE.Mesh(this.missileNoseGeo, this.noseMat);
+    const flame = new THREE.Mesh(this.missileFlameGeo, this.flameMat);
     for (const a of [0, Math.PI / 2, Math.PI, -Math.PI / 2]) {
-      const fin = new THREE.Mesh(new THREE.BoxGeometry(0.03, 0.3, 0.3), this.missileMat);
+      const fin = new THREE.Mesh(this.missileFinGeo, this.missileMat);
       fin.position.set(Math.sin(a) * 0.15, Math.cos(a) * 0.15, -0.5);
       fin.rotation.z = -a;
       mesh.add(fin);
@@ -80,8 +90,8 @@ export class Weapons {
     const x = car.x - fx * 2.9;
     const z = car.z - fz * 2.9;
     const mesh = new THREE.Group();
-    const disc = new THREE.Mesh(new THREE.CylinderGeometry(0.6, 0.7, 0.2, 18), this.mineBodyMat);
-    const light = new THREE.Mesh(new THREE.CylinderGeometry(0.16, 0.16, 0.08, 10), this.mineLightMat);
+    const disc = new THREE.Mesh(this.mineDiscGeo, this.mineBodyMat);
+    const light = new THREE.Mesh(this.mineLightGeo, this.mineLightMat);
     light.position.y = 0.13;
     mesh.add(disc, light);
     mesh.position.set(x, car.y + 0.1, z);

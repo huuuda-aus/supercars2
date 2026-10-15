@@ -33,6 +33,7 @@ export class AiDriver implements Controls {
   throttle = 0;
   brake = 0;
   steer = 0;
+  handbrake = 0; // AI drivers never use it
   // Weapon requests for this tick; the game loop acts on them.
   fireMissile = false;
   dropMine = false;
@@ -227,9 +228,11 @@ export class AiDriver implements Controls {
       const rz = o.z - car.z;
       const g = rx * fx + rz * fz;
       const s = rx * fz - rz * fx;
-      if (g < 1 || g > 18 || Math.abs(s) > 2.8) continue;
+      // A wreck never moves, so give it a wider berth and notice it earlier than a car that may pull away.
+      const reach = o.wrecked ? 30 : 18;
+      if (g < 1 || g > reach || Math.abs(s) > (o.wrecked ? 3.4 : 2.8)) continue;
       // The car's +lateral axis points opposite to the track's side vector.
-      offset += (s >= 0 ? 1 : -1) * 3.2 * (1 - g / 18);
+      offset += (s >= 0 ? 1 : -1) * (o.wrecked ? 5.2 : 3.2) * (1 - g / reach);
     }
     // Careful drivers steer round mines lying ahead.
     this.dodging = false;
@@ -269,7 +272,7 @@ export class AiDriver implements Controls {
       let best: Car | null = null;
       let bestG = Infinity;
       for (const o of this.others()) {
-        if (o === car || o.finished || o.airborne || o.vf < 15 || !this.onSameStretch(o)) continue;
+        if (o === car || o.wrecked || o.finished || o.airborne || o.vf < 15 || !this.onSameStretch(o)) continue;
         const { g, s } = gapTo(o);
         if (g > 9 && g < 28 && Math.abs(s) < 4.5 && g < bestG) { best = o; bestG = g; }
       }

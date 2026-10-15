@@ -42,10 +42,12 @@ export class Race {
     }
   }
 
-  /** Cars sorted by race standing: finishers first (in finishing order), then by progress. */
+  /** Cars sorted by race standing: finishers first (in finishing order), then by progress, wrecks last. */
   standings(cars: Car[], track: Track): Car[] {
-    const rest = cars.filter((c) => !c.finished).sort((a, b) => b.progress(track) - a.progress(track));
-    return [...this.finishOrder, ...rest];
+    const byProgress = (a: Car, b: Car) => b.progress(track) - a.progress(track);
+    const running = cars.filter((c) => !c.finished && !c.wrecked).sort(byProgress);
+    const wrecks = cars.filter((c) => !c.finished && c.wrecked).sort(byProgress);
+    return [...this.finishOrder, ...running, ...wrecks];
   }
 }
 

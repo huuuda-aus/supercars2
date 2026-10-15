@@ -1,11 +1,12 @@
 import * as THREE from 'three';
 import { AiDriver, LEVELS } from './ai';
 import { Car, randomStats } from './car';
-import { collideCars } from './collision';
+import { beginCollisionStep, collideCars } from './collision';
 import { Input, type Controls } from './input';
 import { Minimap } from './minimap';
 import { formatTime, Race } from './race';
 import { applyGroundUVs, createTrees, makeGrassTexture } from './scenery';
+import { Skidmarks } from './skidmarks';
 import { Track } from './track';
 import { Weapons } from './weapons';
 
@@ -38,7 +39,7 @@ scene.add(sun, sun.target);
 function shade(obj: THREE.Object3D, cast: boolean, receive: boolean): void {
   obj.traverse((o) => {
     if (o instanceof THREE.Mesh) {
-      o.castShadow = cast;
+      o.castShadow = cast && !o.userData.noShadow; // smoke and embers cast no shadow
       o.receiveShadow = receive;
     }
   });
@@ -84,12 +85,15 @@ allCars.forEach((c) => {
   shade(c.mesh, true, true);
 });
 
+const skidmarks = new Skidmarks(track);
+scene.add(skidmarks.mesh);
 const weapons = new Weapons(scene, track);
 const race = new Race();
 let levelIndex = 1;
 
 function resetRace(): void {
   weapons.clear();
+  skidmarks.clear();
   car.placeOnTrack(track, track.sampleCount - 6);
   for (const r of rivals) {
     r.car.stats = randomStats();
@@ -143,11 +147,20 @@ const input = new Input();
 const hud = document.getElementById('hud')!;
 const minimap = new Minimap(track);
 const banner = document.getElementById('banner')!;
+const hpFill = document.getElementById('hpfill')!;
+const hpText = document.getElementById('hptext')!;
+
+function updateHealthBar(): void {
+  const hp = Math.max(0, car.health);
+  hpFill.style.width = `${hp}%`;
+  hpFill.style.background = hp > 60 ? '#3fcf5a' : hp > 30 ? '#e6c230' : '#e03a2a';
+  hpText.textContent = car.wrecked ? 'WRECKED' : `HP ${Math.ceil(hp)}`;
+}
 let acc = 0;
 let last = performance.now();
 
-const IDLE: Controls = { throttle: 0, brake: 0, steer: 0 };
-const coast = (c: Car): Controls => ({ throttle: 0, brake: c.vf > 1 ? 1 : 0, steer: 0 });
+const IDLE: Controls = { throttle: 0, brake: 0, steer: 0, handbrake: 0 };
+const coast = (c: Car): Controls => ({ throttle: 0, brake: c.vf > 1 ? 1 : 0, steer: 0, handbrake: 0 });
 
 function controlsFor(c: Car, live: Controls): Controls {
   if (race.state !== 'racing') return IDLE;
@@ -161,9 +174,11 @@ function handleMenuKeys(): void {
       resetRace();
     }
   }
-  if (input.tapped('Enter') && (race.state === 'menu' || car.finished)) {
-    if (car.finished) race.toMenu();
-    else {
+  if (input.tapped('Enter') && (race.state === 'menu' || car.finished || car.wrecked)) {
+    if (car.finished || car.wrecked) {
+      race.toMenu();
+      resetRace(); // clears car.finished/wrecked, otherwise Enter in the menu would never start a race
+    } else {
       resetRace();
       race.start();
     }
@@ -180,12 +195,12 @@ function bannerText(): string {
     return `SUPER CARS\n\nAI difficulty\n${lv}\n\nEnter to start`;
   }
   if (race.state === 'countdown') return String(Math.ceil(race.countdown));
-  if (car.finished) {
+  if (car.finished || car.wrecked) {
     const rows = race.standings(allCars, track).map((c, i) => {
-      const t = c.finished ? formatTime(c.finishTime) : 'racing…';
+      const t = c.finished ? formatTime(c.finishTime) : c.wrecked ? 'wrecked' : 'racing…';
       return `${i + 1}. ${c.name.padEnd(7)} ${t}${c === car ? '  <' : ''}`;
     });
-    return `FINISHED\n\n${rows.join('\n')}\n\nEnter: menu · R: restart`;
+    return `${car.wrecked ? 'WRECKED' : 'FINISHED'}\n\n${rows.join('\n')}\n\nEnter: menu · R: restart`;
   }
   return race.time < 1 ? 'GO!' : '';
 }
@@ -193,8 +208,8 @@ function bannerText(): string {
 function frame(now: number): void {
   acc += Math.min((now - last) / 1000, 0.1);
   last = now;
-  // Weapon keys: Space = missile, X = mine, Shift or N = nitro. Read once per frame.
-  const wantMissile = input.tapped('Space');
+  // Weapon keys: Z = missile, X = mine, Shift or N = nitro. Read once per frame.
+  const wantMissile = input.tapped('KeyZ');
   const wantMine = input.tapped('KeyX');
   const wantNitro = input.tapped('ShiftLeft') || input.tapped('ShiftRight') || input.tapped('KeyN');
   if (race.state === 'racing' && !car.finished) {
@@ -203,6 +218,7 @@ function frame(now: number): void {
     if (wantNitro) car.useNitro();
   }
   while (acc >= STEP) {
+    beginCollisionStep();
     race.update(STEP, allCars);
     car.step(STEP, controlsFor(car, input), track);
     for (const r of rivals) {
@@ -217,6 +233,7 @@ function frame(now: number): void {
     for (let i = 0; i < allCars.length; i++)
       for (let j = i + 1; j < allCars.length; j++) collideCars(allCars[i], allCars[j]);
     weapons.update(STEP, allCars);
+    skidmarks.update(allCars);
     acc -= STEP;
   }
   if (input.tapped('KeyC')) useOrtho = !useOrtho;
@@ -232,9 +249,10 @@ function frame(now: number): void {
   const lap = Math.max(1, Math.min(car.lap, race.totalLaps));
   hud.textContent =
     `P${place}/${allCars.length}   lap ${lap}/${race.totalLaps}   ${formatTime(race.time)}\n` +
-    `${(car.speed * 3.6).toFixed(0)} km/h   height ${car.y.toFixed(1)}${car.airborne ? '  AIR' : ''}${car.offroad ? '  OFFROAD' : ''}${car.nitroActive ? '  NITRO' : ''}\n` +
-    `health ${Math.round(car.health)}%${car.wrecked ? '  WRECKED' : ''}   missiles ${car.ammo.missiles}   mines ${car.ammo.mines}   nitro ${car.ammo.nitro}\n` +
-    `arrows/WASD drive · Space missile · X mine · Shift/N nitro · C camera · R restart · ${LEVELS[levelIndex].name} AI`;
+    `${(car.speed * 3.6).toFixed(0)} km/h   height ${car.y.toFixed(1)}${car.airborne ? '  AIR' : ''}${car.drifting ? `  DRIFT ${Math.round(car.driftCombo)}` : ''}${car.offroad ? '  OFFROAD' : ''}${car.nitroActive ? '  NITRO' : ''}\n` +
+    `missiles ${car.ammo.missiles}   mines ${car.ammo.mines}   nitro ${car.ammo.nitro}   drift pts ${Math.round(car.driftScore)}\n` +
+    `arrows/WASD drive · Space handbrake · Z missile · X mine · Shift/N nitro · C camera · R restart · ${LEVELS[levelIndex].name} AI`;
+  updateHealthBar();
   banner.textContent = bannerText();
   requestAnimationFrame(frame);
 }

@@ -7,11 +7,15 @@
   <style>
     html, body { margin: 0; height: 100%; overflow: hidden; background: #111; }
     canvas { display: block; }
-    #hud { position: fixed; top: 8px; left: 12px; color: #fff; font: 14px/1.4 monospace; text-shadow: 0 0 3px #000; white-space: pre; pointer-events: none; }
+    #hpbar { position: fixed; top: 10px; left: 12px; width: 240px; height: 18px; box-sizing: border-box; background: rgba(10, 14, 12, 0.6); border: 1px solid rgba(255, 255, 255, 0.45); border-radius: 4px; overflow: hidden; pointer-events: none; }
+    #hpfill { height: 100%; width: 100%; background: #3fcf5a; }
+    #hptext { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: #fff; font: bold 12px monospace; text-shadow: 0 0 3px #000; }
+    #hud { position: fixed; top: 36px; left: 12px; color: #fff; font: 14px/1.4 monospace; text-shadow: 0 0 3px #000; white-space: pre; pointer-events: none; }
     #banner { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; text-align: center; color: #fff; font: bold 28px/1.5 monospace; text-shadow: 0 0 6px #000, 0 0 2px #000; white-space: pre; pointer-events: none; }
   </style>
 </head>
 <body>
+  <div id="hpbar"><div id="hpfill"></div><div id="hptext"></div></div>
   <div id="hud"></div>
   <div id="banner"></div>
   <script type="module" src="/src/main.ts"></script>

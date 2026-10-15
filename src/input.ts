@@ -2,6 +2,7 @@ export interface Controls {
   readonly throttle: number;
   readonly brake: number;
   readonly steer: number; // +1 = left, -1 = right
+  readonly handbrake: number; // locks the rear wheels: the car's tail steps out for a drift
 }
 
 export class Input implements Controls {
@@ -29,5 +30,6 @@ export class Input implements Controls {
 
   get throttle(): number { return +this.held('ArrowUp', 'KeyW'); }
   get brake(): number { return +this.held('ArrowDown', 'KeyS'); }
+  get handbrake(): number { return +this.held('Space'); }
   get steer(): number { return +this.held('ArrowLeft', 'KeyA') - +this.held('ArrowRight', 'KeyD'); }
 }
