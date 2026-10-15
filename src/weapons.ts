@@ -17,6 +17,13 @@ const GUN_DAMAGE = 1.2; // HP per bullet that hits
 const GUN_MUZZLE = { forward: 2.0, side: 0.5 };
 const MAX_BULLETS = 200;
 
+const OIL_RADIUS = 2.3; // a wheel inside this is on the slick
+const OIL_LIFE = 20; // seconds
+const OIL_FADE = 3; // the slick shrinks away over its last seconds
+const OIL_SPREAD_TIME = 0.4; // it spreads out after being dropped
+const OIL_MAX = 12; // oldest slicks disappear beyond this
+const OIL_LINGER = 0.5; // seconds the tyres stay slippery after leaving it
+
 const MINE_ARM_TIME = 1.0; // seconds before a dropped mine goes live (for everyone, its owner included)
 const MINE_TRIGGER_RADIUS = 1.8;
 const MINE_LIFE = 45;
@@ -27,14 +34,18 @@ export interface Missile { owner: Car; x: number; z: number; y: number; heading:
 export interface Mine { owner: Car; x: number; z: number; y: number; age: number; mesh: THREE.Object3D }
 interface Bullet { owner: Car; x: number; z: number; y: number; vx: number; vz: number; age: number; index: number }
 interface Spark { mesh: THREE.Mesh; age: number; life: number; size: number }
+export interface Oil { owner: Car; x: number; z: number; y: number; age: number; mesh: THREE.Mesh }
 interface Explosion { mesh: THREE.Mesh; age: number; life: number; radius: number }
 
 /** Forward missiles, rear mines and their explosions. Ammo lives on the cars. */
 export class Weapons {
   readonly missiles: Missile[] = [];
   readonly mines: Mine[] = [];
+  readonly oils: Oil[] = [];
+  /** Mines and slicks as plain points, for drivers who steer around them. Rebuilt every step. */
+  hazards: { x: number; z: number }[] = [];
   private readonly explosions: Explosion[] = [];
-  readonly stats = { missilesFired: 0, rearMissilesFired: 0, missileCarHits: 0, missileWallHits: 0, minesLaid: 0, mineHits: 0, bulletsFired: 0, bulletHits: 0 };
+  readonly stats = { missilesFired: 0, rearMissilesFired: 0, missileCarHits: 0, missileWallHits: 0, minesLaid: 0, mineHits: 0, oilsLaid: 0, bulletsFired: 0, bulletHits: 0 };
   private time = 0;
   private readonly bullets: Bullet[] = [];
   private readonly sparks: Spark[] = [];
@@ -58,6 +69,7 @@ export class Weapons {
   private readonly missileFlameGeo = new THREE.ConeGeometry(0.11, 0.9, 8).rotateX(-Math.PI / 2).translate(0, 0, -1.1);
   private readonly missileFinGeo = new THREE.BoxGeometry(0.03, 0.3, 0.3);
   private readonly mineDiscGeo = new THREE.CylinderGeometry(0.6, 0.7, 0.2, 18);
+  private readonly oilMat = new THREE.MeshStandardMaterial({ color: 0x07070a, roughness: 0.12, metalness: 0.35, transparent: true, opacity: 0.92, polygonOffset: true, polygonOffsetFactor: -5, polygonOffsetUnits: -5, side: THREE.DoubleSide });
   private readonly mineLightGeo = new THREE.CylinderGeometry(0.16, 0.16, 0.08, 10);
 
   constructor(private readonly scene: THREE.Scene, private readonly track: Track) {
@@ -74,6 +86,8 @@ export class Weapons {
   clear(): void {
     for (const m of this.missiles) this.scene.remove(m.mesh);
     for (const m of this.mines) this.scene.remove(m.mesh);
+    while (this.oils.length) this.removeOil(0);
+    this.hazards = [];
     for (const e of this.explosions) {
       this.scene.remove(e.mesh);
       (e.mesh.material as THREE.Material).dispose();
@@ -157,6 +171,47 @@ export class Weapons {
     return true;
   }
 
+  /** Spill an oil slick behind the car. Any car whose wheels run over it loses most of its grip. */
+  dropOil(car: Car): boolean {
+    if (car.wrecked || car.airborne || car.ammo.oil <= 0) return false;
+    car.ammo.oil--;
+    this.stats.oilsLaid++;
+    const x = car.x - Math.sin(car.heading) * 3.4;
+    const z = car.z - Math.cos(car.heading) * 3.4;
+    const y = this.track.query(x, z, car.trackIndex).height;
+    const mesh = new THREE.Mesh(this.buildOilBlob(x, y, z), this.oilMat);
+    mesh.position.set(x, y, z);
+    mesh.scale.set(0.3, 1, 0.3);
+    mesh.receiveShadow = true;
+    mesh.userData.noShadow = true;
+    this.scene.add(mesh);
+    this.oils.push({ owner: car, x, z, y, age: 0, mesh });
+    if (this.oils.length > OIL_MAX) this.removeOil(0);
+    return true;
+  }
+
+  /** An irregular puddle that follows the road surface (vertex heights are sampled from the track). */
+  private buildOilBlob(cx: number, cy: number, cz: number): THREE.BufferGeometry {
+    const SIDES = 16;
+    const pos: number[] = [0, 0.07, 0];
+    const idx: number[] = [];
+    const phase = Math.random() * 10;
+    for (let i = 0; i < SIDES; i++) {
+      const a = (i / SIDES) * Math.PI * 2;
+      const r = OIL_RADIUS * (0.82 + 0.18 * Math.sin(a * 3 + phase) + 0.08 * Math.sin(a * 5 + phase * 2));
+      const lx = Math.cos(a) * r;
+      const lz = Math.sin(a) * r;
+      const h = this.track.query(cx + lx, cz + lz).height;
+      pos.push(lx, h - cy + 0.07, lz);
+      idx.push(0, 1 + i, 1 + ((i + 1) % SIDES));
+    }
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    g.setIndex(idx);
+    g.computeVertexNormals();
+    return g;
+  }
+
   update(dt: number, cars: Car[]): void {
     this.time += dt;
     this.cars = cars;
@@ -169,6 +224,7 @@ export class Weapons {
       }
     }
 
+    this.updateOils(dt, cars);
     this.updateBullets(dt, cars);
     this.updateSparks(dt);
 
@@ -226,6 +282,37 @@ export class Weapons {
       e.mesh.scale.setScalar(Math.max(0.1, e.radius * 0.55 * Math.sqrt(t)));
       (e.mesh.material as THREE.MeshBasicMaterial).opacity = 0.9 * (1 - t);
     }
+  }
+
+  private updateOils(dt: number, cars: Car[]): void {
+    for (let i = this.oils.length - 1; i >= 0; i--) {
+      const o = this.oils[i];
+      o.age += dt;
+      if (o.age > OIL_LIFE) {
+        this.removeOil(i);
+        continue;
+      }
+      const spread = 0.3 + 0.7 * Math.min(1, o.age / OIL_SPREAD_TIME);
+      const fade = Math.min(1, (OIL_LIFE - o.age) / OIL_FADE);
+      o.mesh.scale.set(spread * fade, 1, spread * fade);
+      const reach = OIL_RADIUS * spread * fade;
+      for (const c of cars) {
+        if (c.wrecked || c.airborne || Math.abs(c.y - o.y) > 1.2) continue;
+        if (Math.hypot(c.x - o.x, c.z - o.z) > reach + 3) continue; // cheap reject before checking the wheels
+        if (!c.wheelPoints().some((w) => Math.hypot(w.x - o.x, w.z - o.z) < reach)) continue;
+        // Hitting the slick at speed sets the tail swinging, to either side.
+        if (c.oilTimer <= 0 && c.speed > 6) c.omega += (Math.random() < 0.5 ? -1 : 1) * (0.5 + c.speed * 0.04);
+        c.oilTimer = OIL_LINGER;
+      }
+    }
+    this.hazards = [...this.mines, ...this.oils];
+  }
+
+  private removeOil(i: number): void {
+    const o = this.oils[i];
+    this.scene.remove(o.mesh);
+    o.mesh.geometry.dispose();
+    this.oils.splice(i, 1);
   }
 
   private updateBullets(dt: number, cars: Car[]): void {

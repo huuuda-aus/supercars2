@@ -17,6 +17,7 @@ export interface AiLevel {
   pitSkill: number; // 0..1, aim and timing accuracy of a PIT
   missile: number; // missile shots per second while a target is lined up (0 = never)
   mine: number; // mine drops per second while a car is right behind
+  oil: number; // oil slicks dropped per second while a car is right behind (0 = never)
   rearMissile: number; // rear missile shots per second while a car is lined up behind (0 = never)
   nitro: number; // nitro bursts per second on a clear straight
   gun: number; // machine-gun bursts started per second while a car is dead ahead (0 = never)
@@ -24,9 +25,9 @@ export interface AiLevel {
 }
 
 export const LEVELS: AiLevel[] = [
-  { name: 'Rookie', corner: 0.3, wander: 3.0, steerNoise: 0.5, mistakesPerSec: 0.15, racingLine: 0, pit: 0, pitSkill: 0, missile: 0.15, mine: 0.1, rearMissile: 0.1, nitro: 0.05, gun: 0.3, pickup: 0.3 },
-  { name: 'Pro', corner: 0.65, wander: 1.8, steerNoise: 0.3, mistakesPerSec: 0.06, racingLine: 0.5, pit: 0.4, pitSkill: 0.5, missile: 0.6, mine: 0.4, rearMissile: 0.5, nitro: 0.2, gun: 0.8, pickup: 0.7 },
-  { name: 'Elite', corner: 0.95, wander: 0.8, steerNoise: 0.12, mistakesPerSec: 0.02, racingLine: 1, pit: 1.2, pitSkill: 0.9, missile: 1.5, mine: 1.0, rearMissile: 1.2, nitro: 0.5, gun: 2, pickup: 1 },
+  { name: 'Rookie', corner: 0.3, wander: 3.0, steerNoise: 0.5, mistakesPerSec: 0.15, racingLine: 0, pit: 0, pitSkill: 0, missile: 0.15, mine: 0.1, rearMissile: 0.1, oil: 0.05, nitro: 0.05, gun: 0.3, pickup: 0.3 },
+  { name: 'Pro', corner: 0.65, wander: 1.8, steerNoise: 0.3, mistakesPerSec: 0.06, racingLine: 0.5, pit: 0.4, pitSkill: 0.5, missile: 0.6, mine: 0.4, rearMissile: 0.5, oil: 0.25, nitro: 0.2, gun: 0.8, pickup: 0.7 },
+  { name: 'Elite', corner: 0.95, wander: 0.8, steerNoise: 0.12, mistakesPerSec: 0.02, racingLine: 1, pit: 1.2, pitSkill: 0.9, missile: 1.5, mine: 1.0, rearMissile: 1.2, oil: 0.6, nitro: 0.5, gun: 2, pickup: 1 },
 ];
 
 /**
@@ -42,6 +43,7 @@ export class AiDriver implements Controls {
   fireMissile = false;
   fireRearMissile = false;
   dropMine = false;
+  dropOil = false;
   useNitro = false;
   fireGun = false; // true on every tick of a burst
 
@@ -65,6 +67,7 @@ export class AiDriver implements Controls {
   private missileCooldown = 3;
   private mineCooldown = 3;
   private rearCooldown = 4;
+  private oilCooldown = 5;
   private nitroCooldown = 4;
   private gunBurst = 0; // seconds of firing left in the current burst
   private gunCooldown = 2;
@@ -90,7 +93,7 @@ export class AiDriver implements Controls {
     const n = track.sampleCount;
     const speed = Math.max(car.vf, 0);
     this.t += dt;
-    this.fireMissile = this.fireRearMissile = this.dropMine = this.useNitro = this.fireGun = false;
+    this.fireMissile = this.fireRearMissile = this.dropMine = this.dropOil = this.useNitro = this.fireGun = false;
 
     // A hard knock costs the driver a moment of control, longer for less skilled drivers.
     const impact = car.lastImpact;
@@ -185,6 +188,7 @@ export class AiDriver implements Controls {
     this.missileCooldown -= dt;
     this.mineCooldown -= dt;
     this.rearCooldown -= dt;
+    this.oilCooldown -= dt;
     this.nitroCooldown -= dt;
     this.gunCooldown -= dt;
     this.gunBurst -= dt;
@@ -216,6 +220,12 @@ export class AiDriver implements Controls {
         this.fireRearMissile = true;
         this.rearCooldown = 4;
         this.mineCooldown = Math.max(this.mineCooldown, 1.5); // not a mine on top of it in the same instant
+      }
+      // A slick for a car tailing us closely; not on the same tick as a mine.
+      if (this.oilCooldown <= 0 && car.ammo.oil > 0 && g < -4 && g > -25 && Math.abs(s) < 3 && Math.random() < level.oil * dt) {
+        this.dropOil = true;
+        this.oilCooldown = 7;
+        this.mineCooldown = Math.max(this.mineCooldown, 2);
       }
       if (this.mineCooldown <= 0 && car.ammo.mines > 0 && g < -5 && g > -30 && Math.abs(s) < 3 && Math.random() < level.mine * dt) {
         this.dropMine = true;

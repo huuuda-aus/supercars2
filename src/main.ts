@@ -110,7 +110,7 @@ function resetRace(): void {
   for (const r of rivals) {
     r.car.stats = randomStats();
     r.car.placeOnTrack(track, track.sampleCount - r.grid, r.lane);
-    r.ai = new AiDriver(r.car, track, r.lane, LEVELS[levelIndex], () => allCars, () => weapons.mines, () => pickups.spots);
+    r.ai = new AiDriver(r.car, track, r.lane, LEVELS[levelIndex], () => allCars, () => weapons.hazards, () => pickups.spots);
   }
 }
 resetRace();
@@ -225,11 +225,13 @@ function frame(now: number): void {
   const wantMissile = input.tapped('KeyZ');
   const wantMine = input.tapped('KeyX');
   const wantRear = input.tapped('KeyB');
+  const wantOil = input.tapped('KeyO');
   const wantNitro = input.tapped('ShiftLeft') || input.tapped('ShiftRight') || input.tapped('KeyN');
   if (race.state === 'racing' && !car.finished) {
     if (wantMissile) weapons.fireMissile(car);
     if (wantRear) weapons.fireMissile(car, true);
     if (wantMine) weapons.dropMine(car);
+    if (wantOil) weapons.dropOil(car);
     if (wantNitro) car.useNitro();
   }
   while (acc >= STEP) {
@@ -243,6 +245,7 @@ function frame(now: number): void {
         if (r.ai.fireMissile) weapons.fireMissile(r.car);
         if (r.ai.fireRearMissile) weapons.fireMissile(r.car, true);
         if (r.ai.dropMine) weapons.dropMine(r.car);
+        if (r.ai.dropOil) weapons.dropOil(r.car);
         if (r.ai.useNitro) r.car.useNitro();
         if (r.ai.fireGun) weapons.fireGun(r.car);
       }
@@ -261,6 +264,7 @@ function frame(now: number): void {
   minimap.draw(allCars, car, [
     ...weapons.missiles.map((m) => ({ x: m.x, z: m.z, color: '#ffb030', size: 2.2 })),
     ...pickups.spots.filter((p) => p.active).map((p) => ({ x: p.x, z: p.z, color: PICKUP_COLOURS[p.kind], size: 2.4 })),
+    ...weapons.oils.map((o) => ({ x: o.x, z: o.z, color: '#9a7bd0', size: 3 })),
     ...weapons.mines.map((m) => ({ x: m.x, z: m.z, color: '#ff3020', size: 2.6 })),
   ]);
   updateCamera();
@@ -270,8 +274,8 @@ function frame(now: number): void {
   hud.textContent =
     `P${place}/${allCars.length}   lap ${lap}/${race.totalLaps}   ${formatTime(race.time)}\n` +
     `${(car.speed * 3.6).toFixed(0)} km/h   height ${car.y.toFixed(1)}${car.airborne ? '  AIR' : ''}${car.drifting ? `  DRIFT ${Math.round(car.driftCombo)}` : ''}${car.offroad ? '  OFFROAD' : ''}${car.nitroActive ? '  NITRO' : ''}\n` +
-    `missiles ${car.ammo.missiles}   rear ${car.ammo.rearMissiles}   mines ${car.ammo.mines}   nitro ${car.ammo.nitro}   gun ${car.ammo.bullets}   drift pts ${Math.round(car.driftScore)}${pickupMsgTime > 0 ? `   ${pickupMsg}` : ''}\n` +
-    `arrows/WASD drive · Space handbrake · Z missile · B rear missile · hold F gun · X mine · Shift/N nitro · C camera · R restart · ${LEVELS[levelIndex].name} AI`;
+    `missiles ${car.ammo.missiles}   rear ${car.ammo.rearMissiles}   mines ${car.ammo.mines}   oil ${car.ammo.oil}   nitro ${car.ammo.nitro}   gun ${car.ammo.bullets}   drift pts ${Math.round(car.driftScore)}${pickupMsgTime > 0 ? `   ${pickupMsg}` : ''}\n` +
+    `arrows/WASD drive · Space handbrake · Z missile · B rear missile · hold F gun · X mine · O oil · Shift/N nitro · C camera · R restart · ${LEVELS[levelIndex].name} AI`;
   updateHealthBar();
   banner.textContent = bannerText();
   requestAnimationFrame(frame);

@@ -26,10 +26,10 @@ const LAND_SKID_SPEED = 6;
 const LAND_SKID_FULL = 20;
 const LAND_SKID_TIME = 0.4;
 const WRECK_DECEL = 3; // 1/s, how fast a destroyed car's leftover motion dies away
-export const START_LOADOUT = { missiles: 5, mines: 5, nitro: 3, bullets: 100, rearMissiles: 3 };
+export const START_LOADOUT = { missiles: 5, mines: 5, nitro: 3, bullets: 100, rearMissiles: 3, oil: 3 };
 export type AmmoType = keyof typeof START_LOADOUT;
 /** Most a car can carry of each; pickups top up to this. */
-export const AMMO_MAX: Record<AmmoType, number> = { missiles: 10, mines: 10, nitro: 5, bullets: 200, rearMissiles: 6 };
+export const AMMO_MAX: Record<AmmoType, number> = { missiles: 10, mines: 10, nitro: 5, bullets: 200, rearMissiles: 6, oil: 6 };
 const STEER_RAMP = 6; // steering input slew (1/s), so a tap is a gentle turn and a hold is a sharp one
 const MAX_STEER_ANGLE = 0.42; // front wheel lock (rad)
 
@@ -64,6 +64,10 @@ const DRIFT_STABILIZE = 5;
 const DRIFT_ANGLE = 0.3;
 const DRIFT_MIN_SPEED = 9;
 const DRIFT_GRACE = 0.6; // seconds a drift may be interrupted before the combo is banked
+
+/** Driving over an oil slick: tyre grip multiplier, and how much of the braking and drive force still gets to the road. */
+const OIL_GRIP = 0.15;
+const OIL_TRACTION = 0.45;
 
 const WHEEL_SIGNS: [number, number][] = [[1, 1], [-1, 1], [1, -1], [-1, -1]]; // FL, FR, RL, RR (x sign, z sign)
 
@@ -123,6 +127,7 @@ export class Car {
   private handbrakeState = 0;
   private driftGap = 0; // time since the last drifting step
   drifting = false;
+  oilTimer = 0; // seconds of slippery tyres left; refreshed by the weapons system while a wheel is on a slick
   landSkid = 0; // seconds of tyre scrub left after touching down hard (read by the skidmarks)
   landStrength = 0; // 0..1, how hard the touchdown was
   driftCombo = 0; // score of the drift in progress
@@ -168,6 +173,7 @@ export class Car {
     this.steerState = 0;
     this.handbrakeState = 0;
     this.landSkid = 0;
+    this.oilTimer = 0;
     this.drifting = false;
     this.driftGap = 0;
     this.driftCombo = this.driftScore = 0;
@@ -207,6 +213,7 @@ export class Car {
     this.steerState = 0;
     this.handbrakeState = 0;
     this.landSkid = 0;
+    this.oilTimer = 0;
     this.breakaway = 0;
     this.lastImpact = 0;
     this.airborne = false;
@@ -325,6 +332,7 @@ export class Car {
   step(dt: number, input: Controls, track: Track): void {
     if (this.nitroTimer > 0) this.nitroTimer = Math.max(0, this.nitroTimer - dt);
     this.landSkid = Math.max(0, this.landSkid - dt);
+    this.oilTimer = Math.max(0, this.oilTimer - dt);
     if (this.wrecked) this.wreck.update(dt);
 
     const q = track.query(this.x, this.z, this.trackIndex);
@@ -453,6 +461,8 @@ export class Car {
     }
     if (u > maxSpeed) ax -= (u - maxSpeed) * 2;
     ax -= u * DRAG;
+    const oiled = this.oilTimer > 0;
+    if (oiled) ax *= OIL_TRACTION; // wheels spin or lock instead of gripping
 
     // Steering: ramp toward the input, then convert to a front wheel angle.
     const dSteer = input.steer - this.steerState;
@@ -462,7 +472,7 @@ export class Car {
 
     // AWD: the drive/brake force is split evenly; both axles lose a little grip under load.
     const load = Math.min(1, Math.abs(ax) / ACCEL);
-    const grip = AXLE_GRIP * st.grip * (this.offroad ? OFFROAD_GRIP : 1) * (1 - DRIVE_GRIP_LOSS * load);
+    const grip = AXLE_GRIP * st.grip * (this.offroad ? OFFROAD_GRIP : 1) * (1 - DRIVE_GRIP_LOSS * load) * (oiled ? OIL_GRIP : 1);
     const fFront = tyreForce(u, v + WHEEL_Z * w, delta, grip);
     this.breakaway = Math.max(0, this.breakaway - dt);
     const looseness = 1 - BREAKAWAY_GRIP_LOSS * Math.min(1, this.breakaway / 0.4);
