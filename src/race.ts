@@ -5,7 +5,7 @@ export type RaceState = 'menu' | 'countdown' | 'racing';
 
 export class Race {
   state: RaceState = 'menu';
-  readonly totalLaps = 3;
+  totalLaps = 3; // set from the circuit being raced
   readonly weaponsDelay = 10; // seconds into the race before any weapon can be used
   countdown = 0;
   time = 0;

@@ -54,6 +54,11 @@ export class Minimap {
     this.drawCircuit();
   }
 
+  /** Remove the panel from the page (another circuit is being loaded). */
+  destroy(): void {
+    this.canvas.remove();
+  }
+
   setVisible(visible: boolean): void {
     this.canvas.style.display = visible ? '' : 'none';
   }
@@ -115,7 +120,8 @@ export class Minimap {
     }
 
     // Player last so it sits on top.
-    for (const car of [...cars.filter((c) => c !== player), player]) {
+    // Wrecks are not shown: the map is for the cars still racing. (The player's own wreck goes too.)
+    for (const car of [...cars.filter((c) => c !== player), player].filter((c) => !c.wrecked)) {
       const [x, y] = this.toPanel(car.x, car.z);
       const size = car === player ? TRIANGLE * 1.3 : TRIANGLE;
       ctx.save();

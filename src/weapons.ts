@@ -88,7 +88,9 @@ export class Weapons {
   private readonly oilMat = new THREE.MeshStandardMaterial({ color: 0x07070a, roughness: 0.12, metalness: 0.35, transparent: true, opacity: 0.92, polygonOffset: true, polygonOffsetFactor: -5, polygonOffsetUnits: -5, side: THREE.DoubleSide });
   private readonly mineLightGeo = new THREE.CylinderGeometry(0.16, 0.16, 0.08, 10);
 
-  constructor(private readonly scene: THREE.Scene, private readonly track: Track) {
+  private track!: Track;
+
+  constructor(private readonly scene: THREE.Scene) {
     // One instanced mesh draws every bullet in flight as a short glowing streak.
     const tracerGeo = new THREE.BoxGeometry(0.07, 0.07, 1.5).translate(0, 0, -0.6);
     this.tracers = new THREE.InstancedMesh(tracerGeo, new THREE.MeshBasicMaterial({ color: 0xffe36a }), MAX_BULLETS);
@@ -97,6 +99,11 @@ export class Weapons {
     this.tracers.userData.noShadow = true;
     scene.add(this.tracers);
     scene.add(this.fx.group);
+  }
+
+  /** Race on a different circuit. */
+  setTrack(track: Track): void {
+    this.track = track;
   }
 
   /** Remove everything (race restart). */

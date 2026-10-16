@@ -13,16 +13,10 @@ export interface TrackQuery {
   slope: number; // road gradient (rise per metre) along the direction of increasing sample index
 }
 
-/**
- * Figure 8: a Gerono lemniscate, x = a sin t, z = b sin t cos t. With a = b the two strands cross at
- * right angles, and both run nearly straight through the crossing (it is an inflection point), which is
- * where the jump goes. The lap starts a little before the crossing, on the straight leading into the jump.
- */
-const EIGHT = { a: 105, b: 105, start: -0.5, points: 32 };
-const CONTROL_POINTS: [number, number, number][] = Array.from({ length: EIGHT.points }, (_, k) => {
-  const t = EIGHT.start + (2 * Math.PI * k) / EIGHT.points;
-  return [EIGHT.a * Math.sin(t), 0, EIGHT.b * Math.sin(t) * Math.cos(t)];
-});
+import { THEMES, type TrackDef } from './tracks';
+
+/** Index used for the jump and crossing on circuits that have none (see the constructor). */
+const NO_JUMP = -100000;
 
 const ASPHALT_TILE = 6; // metres of road covered by one texture tile
 
@@ -114,12 +108,22 @@ export class Track {
   readonly crossingIndex: number; // where the other strand passes under the jump (at ground level)
   private readonly searchWindow = 40;
 
-  constructor(readonly sampleCount = 600) {
+  readonly sampleCount: number;
+  readonly hasJump: boolean; // the figure-eight has a pit to jump; other circuits do not
+  /** Middle and half-size of the circuit's footprint, for cameras. */
+  readonly centre = new THREE.Vector2();
+  readonly extent: number;
+
+  constructor(readonly def: TrackDef) {
     const curve = new THREE.CatmullRomCurve3(
-      CONTROL_POINTS.map(([x, y, z]) => new THREE.Vector3(x, y, z)),
+      def.points.map(([x, z]) => new THREE.Vector3(x, 0, z)),
       true,
       'centripetal',
     );
+    // About one sample every 1.07 m on any circuit, because the AI and the pickups reason in samples.
+    const sampleCount = Math.round(curve.getLength() / 1.07);
+    this.sampleCount = sampleCount;
+    this.hasJump = def.jump;
     for (let i = 0; i < sampleCount; i++) {
       const t = i / sampleCount;
       const p = curve.getPointAt(t);
@@ -136,13 +140,28 @@ export class Track {
     }
     this.spacing = length / sampleCount;
 
-    const gap = this.jumpLayout();
-    this.crossingIndex = this.findCrossing();
+    // Without a jump the "gap" and "crossing" indices are parked far outside the track, so that every zone test
+    // built on them (AI run-up, weapon bans near the jump...) is simply false.
+    const gap = def.jump ? this.jumpLayout() : { from: NO_JUMP, to: NO_JUMP };
+    this.crossingIndex = def.jump ? this.findCrossing() : NO_JUMP;
     this.addRolling(gap.from, gap.to);
-    this.addJump(gap);
+    if (def.jump) this.addJump(gap);
     this.gapFrom = gap.from;
     this.gapTo = gap.to;
-    this.respawnIndex = (gap.from - 65 + sampleCount) % sampleCount;
+    this.respawnIndex = def.jump ? (gap.from - 65 + sampleCount) % sampleCount : 0;
+
+    let minX = Infinity;
+    let maxX = -Infinity;
+    let minZ = Infinity;
+    let maxZ = -Infinity;
+    for (const { p } of this.samples) {
+      minX = Math.min(minX, p.x);
+      maxX = Math.max(maxX, p.x);
+      minZ = Math.min(minZ, p.z);
+      maxZ = Math.max(maxZ, p.z);
+    }
+    this.centre.set((minX + maxX) / 2, (minZ + maxZ) / 2);
+    this.extent = Math.max(maxX - minX, maxZ - minZ) / 2;
 
     this.mesh = this.buildMesh();
     this.walls = this.buildWalls();
@@ -157,7 +176,7 @@ export class Track {
     const n = this.sampleCount;
     const smooth = (t: number) => { const c = Math.min(1, Math.max(0, t)); return c * c * (3 - 2 * c); };
     const heights = this.samples.map((_, i) => {
-      const raw = ROLLING.reduce((sum, w) => sum + w.amplitude * Math.sin((2 * Math.PI * w.cycles * i) / n + w.phase), 0);
+      const raw = ROLLING.reduce((sum, w) => sum + w.amplitude * Math.sin((2 * Math.PI * w.cycles * i) / n + w.phase), 0) * this.def.hills;
       // Distance in samples from the flat zone around the jump, 0 inside it.
       const outside = Math.max(from - FLAT_BEFORE_JUMP - i, i - (to + FLAT_AFTER_JUMP), 0);
       return raw * smooth(outside / FLAT_BLEND);
@@ -411,8 +430,9 @@ export class Track {
     const col: number[] = [];
     const idx: number[] = [];
     // Multiplied with the grass texture, so grass is plain white and dirt is a warm tint.
-    const grass = new THREE.Color(0xffffff);
-    const dirt = new THREE.Color(0xd6b48a);
+    const style = THEMES[this.def.theme];
+    const grass = new THREE.Color(style.shoulder);
+    const dirt = new THREE.Color(style.embankment);
     const groundY = -0.05;
     const outer = this.wallOffset + this.wallThickness;
 
@@ -495,6 +515,7 @@ export class Track {
 
   /** The two sheer faces of the ramps either side of the gap. The ground beneath is the other road and grass. */
   private buildPit(): THREE.Mesh {
+    if (!this.hasJump) return new THREE.Mesh(new THREE.BufferGeometry(), new THREE.MeshBasicMaterial());
     const outer = this.wallOffset + this.wallThickness;
     const floor = this.pitFloor + 0.01;
     const face = new THREE.Color(0x7d6a4c);

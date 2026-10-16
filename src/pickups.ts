@@ -102,13 +102,17 @@ function pickCash(): number {
   return CASH_VALUES[0][0];
 }
 
-function pickKind(): PickupKind {
-  let r = Math.random();
-  for (const [kind, weight] of KIND_WEIGHTS) {
+/** Crates that only make sense with weapons in the race. */
+const WEAPON_KINDS: PickupKind[] = ['ammo', 'gun', 'rear', 'oil'];
+
+function pickKind(weapons: boolean): PickupKind {
+  const options = KIND_WEIGHTS.filter(([kind]) => weapons || !WEAPON_KINDS.includes(kind));
+  let r = Math.random() * options.reduce((sum, [, weight]) => sum + weight, 0);
+  for (const [kind, weight] of options) {
     if (r < weight) return kind;
     r -= weight;
   }
-  return 'ammo';
+  return options[0][0];
 }
 
 /** Circular distance from sample i forward to sample `target` (0..n). */
@@ -121,6 +125,8 @@ const ahead = (i: number, target: number, n: number) => (target - i + n) % n;
 export class Pickups {
   readonly spots: PickupSpot[] = [];
   readonly group = new THREE.Group();
+  /** With weapons off, no weapon crates appear (they re-roll at the next reset or respawn). */
+  weaponsEnabled = true;
   onCollect?: (car: Car, kind: PickupKind, text: string, value: number) => void;
 
   private readonly models: Record<PickupKind, THREE.Group>[] = [];
@@ -132,8 +138,8 @@ export class Pickups {
   constructor(track: Track) {
     const n = track.sampleCount;
     const blocked = (i: number) => {
-      if (ahead(track.gapFrom - 90, i, n) <= track.gapTo + 30 - (track.gapFrom - 90)) return true; // the jump and its run-up
-      if (ahead(track.crossingIndex - 40, i, n) <= 80) return true; // the crossing under the jump
+      if (track.hasJump && ahead(track.gapFrom - 90, i, n) <= track.gapTo + 30 - (track.gapFrom - 90)) return true; // the jump and its run-up
+      if (track.hasJump && ahead(track.crossingIndex - 40, i, n) <= 80) return true; // the crossing under the jump
       if (ahead(n - 90, i, n) <= 105) return true; // the starting grid
       return false;
     };
@@ -184,7 +190,7 @@ export class Pickups {
   /** New race: everything back, with fresh random contents. */
   reset(): void {
     for (const spot of this.spots) {
-      spot.kind = pickKind();
+      spot.kind = pickKind(this.weaponsEnabled);
       spot.value = pickCash();
       spot.active = true;
       spot.timer = 0;
@@ -198,7 +204,7 @@ export class Pickups {
       if (!spot.active) {
         spot.timer -= dt;
         if (spot.timer <= 0) {
-          spot.kind = pickKind();
+          spot.kind = pickKind(this.weaponsEnabled);
           spot.value = pickCash();
           spot.active = true;
           this.sync(i);

@@ -1,35 +1,38 @@
 import * as THREE from 'three';
 import type { Track } from './track';
+import { THEMES, type Theme } from './tracks';
 
 const GROUND_SIZE = 1000;
 const GRASS_TILE = 10; // metres per grass texture tile
 
-/** Tileable grass: noisy green base plus short blades. Blades are drawn wrapped so edges tile cleanly. */
-export function makeGrassTexture(): THREE.CanvasTexture {
+/** Tileable ground for a theme: a noisy base colour plus short blades (grass) or specks (snow, rock), drawn wrapped so edges tile. */
+export function makeGroundTexture(theme: Theme): THREE.CanvasTexture {
+  const style = THEMES[theme].ground;
   const size = 256;
   const canvas = document.createElement('canvas');
   canvas.width = canvas.height = size;
   const ctx = canvas.getContext('2d')!;
 
+  const weights = style.blade ? [0.6, 1, 0.5] : [1, 1, 1];
   const img = ctx.createImageData(size, size);
   for (let i = 0; i < size * size; i++) {
-    const n = (Math.random() - 0.5) * 30;
-    img.data[i * 4] = 70 + n * 0.6;
-    img.data[i * 4 + 1] = 118 + n;
-    img.data[i * 4 + 2] = 50 + n * 0.5;
+    const n = (Math.random() - 0.5) * style.noise;
+    img.data[i * 4] = style.base[0] + n * weights[0];
+    img.data[i * 4 + 1] = style.base[1] + n * weights[1];
+    img.data[i * 4 + 2] = style.base[2] + n * weights[2];
     img.data[i * 4 + 3] = 255;
   }
   ctx.putImageData(img, 0, 0);
 
   ctx.lineCap = 'round';
-  for (let i = 0; i < 1800; i++) {
+  const marks = style.blade ? 1800 : 900;
+  for (let i = 0; i < marks; i++) {
     const x = Math.random() * size;
     const y = Math.random() * size;
     const a = -Math.PI / 2 + (Math.random() - 0.5) * 1.2;
-    const len = 3 + Math.random() * 5;
-    const shade = Math.random();
-    ctx.strokeStyle = shade < 0.5 ? 'rgba(40,85,32,0.55)' : shade < 0.85 ? 'rgba(110,165,70,0.5)' : 'rgba(150,170,80,0.45)';
-    ctx.lineWidth = 1 + Math.random();
+    const len = style.blade ? 3 + Math.random() * 5 : 1 + Math.random() * 3;
+    ctx.strokeStyle = style.fleck[Math.min(style.fleck.length - 1, Math.floor(Math.random() * style.fleck.length))];
+    ctx.lineWidth = 1 + Math.random() * (style.blade ? 1 : 1.5);
     for (const dx of [-size, 0, size]) {
       for (const dy of [-size, 0, size]) {
         ctx.beginPath();
@@ -76,7 +79,9 @@ function mulberry32(seed: number): () => number {
  * Low-poly trees scattered around the circuit, never closer than `clearance` metres to the
  * road centreline (plus the embankment width on raised sections), so they stay clear of the barriers. One InstancedMesh per part.
  */
-export function createTrees(track: Track, count = 420, clearance = 16.5): THREE.Group {
+export function createTrees(track: Track, clearance = 16.5): THREE.Group {
+  const style = THEMES[track.def.theme].trees;
+  const count = style.count;
   const rand = mulberry32(20260714);
   const group = new THREE.Group();
 
@@ -105,7 +110,7 @@ export function createTrees(track: Track, count = 420, clearance = 16.5): THREE.
     }
     if (blocked) continue;
     if (spots.some((s) => (s.x - x) ** 2 + (s.z - z) ** 2 < 16)) continue;
-    spots.push({ x, z, pine: rand() < 0.65, scale: 0.8 + rand() * 0.9, rot: rand() * Math.PI * 2 });
+    spots.push({ x, z, pine: rand() < style.pineShare, scale: 0.8 + rand() * 0.9, rot: rand() * Math.PI * 2 });
   }
 
   const pines = spots.filter((s) => s.pine);
@@ -133,7 +138,7 @@ export function createTrees(track: Track, count = 420, clearance = 16.5): THREE.
       dummy.scale.set(s.scale, s.scale * (0.9 + rand() * 0.3), s.scale);
       dummy.updateMatrix();
       mesh.setMatrixAt(i, dummy.matrix);
-      tint.setHSL(0.3 + hueShift + (rand() - 0.5) * 0.06, 0.45 + rand() * 0.2, 0.22 + rand() * 0.1);
+      tint.setHSL(style.hue + hueShift + (rand() - 0.5) * 0.06, style.saturation + rand() * 0.2, style.lightness + rand() * 0.1);
       mesh.setColorAt(i, tint);
     });
     mesh.castShadow = mesh.receiveShadow = true;

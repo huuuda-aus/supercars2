@@ -12,9 +12,9 @@ import { PICKUP_COLOURS, Pickups } from './pickups';
 import { buildCarModel } from './carmodel';
 import { cleanName, loadGame, loadSettings, newGame, prizeFor, saveGame, saveSettings, type SaveGame } from './save';
 import { Screens } from './screens';
-import { trackForRace, TRACK_LIST } from './tracks';
+import { THEMES, trackForRace, TRACK_LIST, trackLength, type Theme, type TrackDef } from './tracks';
 import { formatTime, Race } from './race';
-import { applyGroundUVs, createTrees, makeGrassTexture } from './scenery';
+import { applyGroundUVs, createTrees, makeGroundTexture } from './scenery';
 import { Skidmarks } from './skidmarks';
 import { Track } from './track';
 import { aiStats, MAX_UPGRADE_LEVEL, RIVAL_CAR_TIER, starterStats, statsFor, upgradePrice, type UpgradeSlot } from './upgrades';
@@ -55,29 +55,30 @@ function shade(obj: THREE.Object3D, cast: boolean, receive: boolean): void {
   });
 }
 
-const grass = makeGrassTexture();
-const ground = new THREE.Mesh(
-  new THREE.PlaneGeometry(1000, 1000),
-  new THREE.MeshLambertMaterial({ map: grass }),
-);
+const groundTextures = new Map<Theme, THREE.CanvasTexture>();
+function groundTexture(theme: Theme): THREE.CanvasTexture {
+  let tex = groundTextures.get(theme);
+  if (!tex) {
+    tex = makeGroundTexture(theme);
+    groundTextures.set(theme, tex);
+  }
+  return tex;
+}
+
+const ground = new THREE.Mesh(new THREE.PlaneGeometry(1000, 1000), new THREE.MeshLambertMaterial({ map: groundTexture('grass') }));
 ground.rotation.x = -Math.PI / 2;
 ground.position.y = -0.05;
 shade(ground, false, true);
 scene.add(ground);
 
-const track = new Track();
-scene.add(track.mesh, track.centreLine, track.kerbs, track.finishLine, track.walls, track.terrain, track.pit);
-shade(track.mesh, true, true);
-shade(track.centreLine, false, true);
-shade(track.kerbs, false, true);
-shade(track.finishLine, false, true);
-shade(track.pit, false, true);
-shade(track.walls, true, true);
-shade(track.terrain, true, true);
-applyGroundUVs(track.terrain);
-(track.terrain.material as THREE.MeshLambertMaterial).map = grass;
-const trees = createTrees(track);
-scene.add(trees);
+// Everything that belongs to the circuit being raced; swapped as a whole by loadTrack().
+let track!: Track;
+let skidmarks!: Skidmarks;
+let pickups!: Pickups;
+let minimap!: Minimap;
+let circuitObjects: THREE.Object3D[] = [];
+let loadedTrackId = '';
+let raceUiVisible = false;
 
 let playerStats = starterStats();
 let playerName = 'You';
@@ -97,28 +98,84 @@ allCars.forEach((c) => {
   shade(c.mesh, true, true);
 });
 
-const skidmarks = new Skidmarks(track);
-scene.add(skidmarks.mesh);
-const weapons = new Weapons(scene, track);
-const pickups = new Pickups(track);
-scene.add(pickups.group);
+const weapons = new Weapons(scene);
 let pickupMsg = '';
 let raceCash = 0; // cash crates picked up in this race; banked when you finish it (career only)
 let pickupMsgTime = 0;
-pickups.onCollect = (c, kind, text, value) => {
-  audio.playEvent({ type: 'pickup', x: c.x, z: c.z, kind });
-  if (c !== car) return;
-  if (kind === 'cash') raceCash += value;
-  popups.spawn(PICKUP_NAMES[kind] ?? kind, text, PICKUP_COLOURS[kind]);
-  pickupMsg = text;
-  pickupMsgTime = 2;
-};
 const race = new Race();
+
+/** Build the world for a circuit: road, walls, terrain, scenery, skid marks, power-up spots and the minimap. */
+function loadTrack(def: TrackDef): void {
+  if (loadedTrackId === def.id) return;
+  for (const o of circuitObjects) {
+    scene.remove(o);
+    o.traverse((c) => {
+      if (c instanceof THREE.Mesh || c instanceof THREE.InstancedMesh) c.geometry.dispose();
+    });
+  }
+  minimap?.destroy();
+
+  track = new Track(def);
+  circuitObjects = [track.mesh, track.centreLine, track.kerbs, track.finishLine, track.walls, track.terrain, track.pit];
+  scene.add(...circuitObjects);
+  shade(track.mesh, true, true);
+  shade(track.centreLine, false, true);
+  shade(track.kerbs, false, true);
+  shade(track.finishLine, false, true);
+  shade(track.pit, false, true);
+  shade(track.walls, true, true);
+  shade(track.terrain, true, true);
+  applyGroundUVs(track.terrain);
+
+  const style = THEMES[def.theme];
+  const tex = groundTexture(def.theme);
+  scene.background = new THREE.Color(style.background);
+  (ground.material as THREE.MeshLambertMaterial).map = tex;
+  (ground.material as THREE.MeshLambertMaterial).needsUpdate = true;
+  (track.terrain.material as THREE.MeshLambertMaterial).map = tex;
+  const trees = createTrees(track);
+  scene.add(trees);
+  circuitObjects.push(trees);
+
+  skidmarks = new Skidmarks(track);
+  scene.add(skidmarks.mesh);
+  circuitObjects.push(skidmarks.mesh);
+
+  pickups = new Pickups(track);
+  scene.add(pickups.group);
+  circuitObjects.push(pickups.group);
+  pickups.onCollect = (c, kind, text, value) => {
+    audio.playEvent({ type: 'pickup', x: c.x, z: c.z, kind });
+    if (c !== car) return;
+    if (kind === 'cash') raceCash += value;
+    popups.spawn(PICKUP_NAMES[kind] ?? kind, text, PICKUP_COLOURS[kind]);
+    pickupMsg = text;
+    pickupMsgTime = 2;
+  };
+
+  minimap = new Minimap(track);
+  minimap.setVisible(raceUiVisible);
+  weapons.setTrack(track);
+  race.totalLaps = def.laps;
+  loadedTrackId = def.id;
+}
 let levelIndex = loadSettings().difficulty;
+let weaponsEnabled = loadSettings().weapons;
 
 /** Starting grid in rows of two: slot 0 is pole position (the player), slot 1 sits beside it, slot 2 starts the next row. */
 const GRID_ROW_GAP = 9; // samples between rows (about 9.6 m)
 const GRID_LANE = 3.5; // metres either side of the centreline
+/**
+ * Where the player starts on the grid (0 = pole position, 7 = last). A first race and training start at the back;
+ * after that the grid is reversed against the last result: win and you start last, finish last and you start on pole.
+ */
+let playerGridSlot = 7;
+function gridSlotFor(game: SaveGame | null): number {
+  const last = game?.lastRace?.position;
+  return last ? Math.max(0, Math.min(7, allCarsCount() - last)) : 7;
+}
+const allCarsCount = () => rivals.length + 1;
+
 function gridSlot(slot: number): { index: number; lane: number } {
   return { index: track.sampleCount - 6 - Math.floor(slot / 2) * GRID_ROW_GAP, lane: (slot % 2 === 0 ? -1 : 1) * GRID_LANE };
 }
@@ -130,17 +187,18 @@ function resetRace(): void {
   pickups.reset();
   pickupMsgTime = 0;
   car.stats = playerStats;
-  const pole = gridSlot(0);
-  car.placeOnTrack(track, pole.index, pole.lane);
-  for (const [i, r] of rivals.entries()) {
-    const slot = gridSlot(i + 1);
+  const own = gridSlot(playerGridSlot);
+  car.placeOnTrack(track, own.index, own.lane);
+  // The rivals fill the other slots in order.
+  let next = 0;
+  for (const r of rivals) {
+    if (next === playerGridSlot) next++;
+    const slot = gridSlot(next++);
     r.car.stats = aiStats(RIVAL_CAR_TIER);
     r.car.placeOnTrack(track, slot.index, slot.lane);
     r.ai = new AiDriver(r.car, track, slot.lane, LEVELS[levelIndex], () => allCars, () => weapons.hazards, () => pickups.spots);
   }
 }
-resetRace();
-
 const ortho = new THREE.OrthographicCamera(-1, 1, 1, -1, 1, 300);
 const chase = new THREE.PerspectiveCamera(60, 1, 0.1, 500);
 let useOrtho = true;
@@ -183,7 +241,6 @@ function updateCamera(): void {
 
 const input = new Input();
 const hud = document.getElementById('hud')!;
-const minimap = new Minimap(track);
 const gauges = new Gauges();
 const audio = new GameAudio();
 const popups = new Popups();
@@ -237,6 +294,7 @@ let careerGame: SaveGame | null = null; // the career being raced, or null in tr
 let trainingTrack = 0;
 
 function setRaceUi(on: boolean): void {
+  raceUiVisible = on;
   const display = on ? '' : 'none';
   hud.style.display = hpBar.style.display = banner.style.display = display;
   minimap.setVisible(on);
@@ -267,6 +325,9 @@ function enterMenu(show: () => void): void {
 
 function startRace(): void {
   levelIndex = loadSettings().difficulty;
+  weaponsEnabled = loadSettings().weapons;
+  playerGridSlot = gridSlotFor(careerGame);
+  loadTrack(careerGame ? trackForRace(careerGame.racesDone) : TRACK_LIST[trainingTrack]);
   if (careerGame) {
     playerStats = statsFor(careerGame.levels);
     playerName = careerGame.name;
@@ -277,6 +338,7 @@ function startRace(): void {
     playerName = saved?.name ?? 'You';
     setPlayerCar(saved?.carId ?? GARAGE[GARAGE.length - 1].id);
   }
+  pickups.weaponsEnabled = weaponsEnabled;
   resetRace();
   race.start();
   mode = 'race';
@@ -356,7 +418,7 @@ function showTrainingTracks(): void {
   careerGame = null;
   enterMenu(() =>
     screens.showTracks({
-      tracks: TRACK_LIST,
+      tracks: TRACK_LIST.map((t) => ({ name: t.name, description: `${t.description}  ·  ${t.laps} laps, ${Math.round(trackLength(t))} m` })),
       onPick: (i) => {
         trainingTrack = i;
         startRace();
@@ -372,9 +434,11 @@ function showSettings(): void {
       levels: LEVELS.map((l) => l.name),
       difficulty: loadSettings().difficulty,
       onDifficulty: (i) => {
-        saveSettings({ difficulty: i });
+        saveSettings({ ...loadSettings(), difficulty: i });
         levelIndex = i;
       },
+      weapons: loadSettings().weapons,
+      onWeapons: (on) => saveSettings({ ...loadSettings(), weapons: on }),
       onBack: showTitle,
     }),
   );
@@ -402,6 +466,7 @@ function showShop(game: SaveGame, focus?: UpgradeSlot): void {
       game,
       carName: garageCar(game.carId).name,
       nextTrack: trackForRace(game.racesDone),
+      gridPosition: gridSlotFor(game) + 1,
       focus,
       onBuy: (slot) => buyUpgrade(game, slot),
       onNextRace: startRace,
@@ -420,10 +485,11 @@ function renderMenu(now: number): void {
     return;
   }
   const a = now / 14000;
-  sun.target.position.set(0, 0, 0);
+  const { centre, extent } = track;
+  sun.target.position.set(centre.x, 0, centre.y);
   sun.position.copy(sun.target.position).add(SUN_OFFSET);
-  chase.position.set(Math.cos(a) * 150, 85, Math.sin(a) * 150);
-  chase.lookAt(0, 0, 0);
+  chase.position.set(centre.x + Math.cos(a) * extent * 1.1, extent * 0.6, centre.y + Math.sin(a) * extent * 1.1);
+  chase.lookAt(centre.x, 0, centre.y);
   renderer.render(scene, chase);
 }
 
@@ -493,7 +559,7 @@ function frame(now: number): void {
   acc += frameTime;
   pickupMsgTime = Math.max(0, pickupMsgTime - frameTime);
   last = now;
-  weapons.locked = race.weaponsLockedFor > 0; // also here, so keys read below see the current lockout
+  weapons.locked = !weaponsEnabled || race.weaponsLockedFor > 0; // also here, so keys read below see the current lockout
   // Weapon keys: Z = missile, X = mine, Shift or N = nitro. Read once per frame.
   const wantMissile = input.tapped('KeyZ');
   const wantMine = input.tapped('KeyX');
@@ -511,7 +577,7 @@ function frame(now: number): void {
   while (acc >= STEP) {
     beginCollisionStep();
     for (const c of allCars) c.held = race.state === 'countdown';
-    weapons.locked = race.weaponsLockedFor > 0;
+    weapons.locked = !weaponsEnabled || race.weaponsLockedFor > 0;
     if (race.state === 'racing' && !car.finished && input.held('KeyF')) weapons.fireGun(car);
     race.update(STEP, allCars);
     car.step(STEP, controlsFor(car, input), track);
@@ -549,8 +615,8 @@ function frame(now: number): void {
   const lap = Math.max(1, Math.min(car.lap, race.totalLaps));
   hud.textContent =
     `P${place}/${allCars.length}   lap ${lap}/${race.totalLaps}   ${formatTime(race.time)}\n` +
-    `height ${car.y.toFixed(1)}${car.airborne ? '  AIR' : ''}${car.drifting ? `  DRIFT ${Math.round(car.driftCombo)}` : ''}${car.offroad ? '  OFFROAD' : ''}${car.nitroActive ? '  NITRO' : ''}${car.shieldTimer > 0 ? `  SHIELD ${Math.ceil(car.shieldTimer)}s` : ''}${race.state === 'racing' && race.weaponsLockedFor > 0 ? `  WEAPONS LOCKED ${Math.ceil(race.weaponsLockedFor)}s` : ''}\n` +
-    `[Z] missile ${car.ammo.missiles} · [B] rear ${car.ammo.rearMissiles} · [F] gun ${car.ammo.bullets} · [X] mine ${car.ammo.mines} · [O] oil ${car.ammo.oil} · [Shift] nitro ${car.ammo.nitro}\n` +
+    `height ${car.y.toFixed(1)}${car.airborne ? '  AIR' : ''}${car.drifting ? `  DRIFT ${Math.round(car.driftCombo)}` : ''}${car.offroad ? '  OFFROAD' : ''}${car.nitroActive ? '  NITRO' : ''}${car.shieldTimer > 0 ? `  SHIELD ${Math.ceil(car.shieldTimer)}s` : ''}${weaponsEnabled && race.state === 'racing' && race.weaponsLockedFor > 0 ? `  WEAPONS LOCKED ${Math.ceil(race.weaponsLockedFor)}s` : ''}\n` +
+    `${weaponsEnabled ? `[Z] missile ${car.ammo.missiles} · [B] rear ${car.ammo.rearMissiles} · [F] gun ${car.ammo.bullets} · [X] mine ${car.ammo.mines} · [O] oil ${car.ammo.oil} · ` : 'weapons off · '}[Shift] nitro ${car.ammo.nitro}\n` +
     `drift pts ${Math.round(car.driftScore)}${pickupMsgTime > 0 ? `   ${pickupMsg}` : ''}\n` +
     `arrows/WASD drive · Space handbrake · C camera · M mute · R restart · ${LEVELS[levelIndex].name} AI`;
   // Tooltips float above the car, wherever the camera has it on screen.
@@ -563,5 +629,6 @@ function frame(now: number): void {
   banner.textContent = bannerText();
   requestAnimationFrame(frame);
 }
+loadTrack(TRACK_LIST[0]);
 showTitle();
 requestAnimationFrame(frame);

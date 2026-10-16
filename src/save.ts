@@ -26,9 +26,11 @@ export interface SaveGame {
 export interface Settings {
   /** Index into the AI levels (0 = Rookie). */
   difficulty: number;
+  /** Missiles, mines, guns and oil on or off, in every race. */
+  weapons: boolean;
 }
 
-export const DEFAULT_SETTINGS: Settings = { difficulty: 1 };
+export const DEFAULT_SETTINGS: Settings = { difficulty: 1, weapons: true };
 
 /**
  * Prize money by final position (index 0 = winner). Every one of the eight cars is paid: $1,500 for first down to $50 for
@@ -99,7 +101,10 @@ export function saveGame(game: SaveGame): void {
 export function loadSettings(): Settings {
   const raw = read(SETTINGS_KEY) as Partial<Settings> | null;
   const d = raw?.difficulty;
-  return { difficulty: typeof d === 'number' && Number.isInteger(d) && d >= 0 && d <= 2 ? d : DEFAULT_SETTINGS.difficulty };
+  return {
+    difficulty: typeof d === 'number' && Number.isInteger(d) && d >= 0 && d <= 2 ? d : DEFAULT_SETTINGS.difficulty,
+    weapons: typeof raw?.weapons === 'boolean' ? raw.weapons : DEFAULT_SETTINGS.weapons,
+  };
 }
 
 export function saveSettings(settings: Settings): void {

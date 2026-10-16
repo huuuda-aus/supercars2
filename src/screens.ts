@@ -1,7 +1,10 @@
 import type { UiSound } from './audio';
 import { GARAGE, type CarId } from './garage';
 import { MAX_NAME_LENGTH, type SaveGame } from './save';
-import type { TrackInfo } from './tracks';
+import type { TrackDef } from './tracks';
+
+/** What the track lists show of a circuit. */
+type TrackInfo = Pick<TrackDef, 'name' | 'description'>;
 import { formatSlotValue, MAX_UPGRADE_LEVEL, SLOT_INFO, upgradePrice, UPGRADE_SLOTS, type UpgradeSlot } from './upgrades';
 
 type Handler = () => void;
@@ -167,7 +170,7 @@ export class Screens {
     this.open(page, o.onBack);
   }
 
-  showSettings(o: { levels: string[]; difficulty: number; onDifficulty: (index: number) => void; onBack: Handler }): void {
+  showSettings(o: { levels: string[]; difficulty: number; onDifficulty: (index: number) => void; weapons: boolean; onWeapons: (on: boolean) => void; onBack: Handler }): void {
     const page = el('div', 'screen centre');
     page.append(el('h2', '', 'Settings'), el('p', 'note', 'AI difficulty: how well the rival drivers drive and fight. Their cars are the same at every level.'));
     const menu = el('div', 'menu');
@@ -179,8 +182,16 @@ export class Screens {
       menu.append(b);
       return b;
     });
-    menu.append(this.button('Back', o.onBack, { sound: 'back' }));
-    page.append(menu);
+    const weaponsNote = el('p', 'note', 'Weapons: missiles, mines, the machine gun and oil, for you and the rivals, in every race.');
+    let weaponsOn = o.weapons;
+    const toggle = this.button(`Weapons: ${weaponsOn ? 'ON' : 'OFF'}`, () => {
+      weaponsOn = !weaponsOn;
+      o.onWeapons(weaponsOn);
+      toggle.querySelector('.label')!.textContent = `Weapons: ${weaponsOn ? 'ON' : 'OFF'}`;
+      toggle.classList.toggle('selected', weaponsOn);
+    }, { selected: weaponsOn });
+    menu.append(toggle, this.button('Back', o.onBack, { sound: 'back' }));
+    page.append(menu, weaponsNote);
     this.open(page, o.onBack);
   }
 
@@ -189,6 +200,7 @@ export class Screens {
     game: SaveGame;
     carName: string;
     nextTrack: TrackInfo;
+    gridPosition: number; // where the player will start the next race (1 = pole)
     onBuy: (slot: UpgradeSlot) => void;
     onNextRace: Handler;
     onMenu: Handler;
@@ -243,7 +255,7 @@ export class Screens {
     }
 
     const footer = el('div', 'shop-foot');
-    const next = this.button(`Next race: ${o.nextTrack.name}`, o.onNextRace, { hint: `race ${g.racesDone + 1}` });
+    const next = this.button(`Next race: ${o.nextTrack.name}`, o.onNextRace, { hint: `race ${g.racesDone + 1}  ·  you start P${o.gridPosition}` });
     next.classList.add('primary');
     footer.append(this.button('Main menu', o.onMenu, { sound: 'back' }), next);
 
