@@ -28,6 +28,7 @@ const LAND_SKID_TIME = 0.4;
 /** How much of its speed into a ramp face a crashed car keeps, as a rebound. */
 const FACE_REBOUND = 0.3;
 const ATTACK_MEMORY = 8; // seconds a hit is remembered when crediting a wreck
+const MIN_FLIGHT = 0.4; // seconds in the air before a flight counts (a hop over a crest does not)
 const WRECK_DECEL = 0.5; // 1/s, viscous part of how fast a destroyed car's leftover motion dies away
 const WRECK_FRICTION = 12; // m/s^2 of dry scraping: with the wreck mass this out-pulls a car's engine, so pushing slowly does nothing
 export const START_LOADOUT = { missiles: 5, mines: 5, nitro: 3, bullets: 100, rearMissiles: 3, oil: 3 };
@@ -227,6 +228,8 @@ export class Car {
   landSkid = 0; // seconds of tyre scrub left after touching down hard (read by the skidmarks)
   landStrength = 0; // 0..1, how hard the touchdown was
   driftCombo = 0; // score of the drift in progress
+  airSeconds = 0; // time spent in the air on flights that ended in a landing (for the score)
+  private airTime = 0; // the current flight
   driftScore = 0; // banked this race
   private pitch = 0; // visual only
   private readonly frontPivots: THREE.Group[];
@@ -286,6 +289,7 @@ export class Car {
     this.drifting = false;
     this.driftGap = 0;
     this.driftCombo = this.driftScore = 0;
+    this.airSeconds = this.airTime = 0;
     this.airborne = false;
     this.resetLoadout();
     this.syncMesh();
@@ -524,6 +528,7 @@ export class Car {
     collideWalls(this, track);
 
     // Vertical: free fall, snap to the ground, inherit the slope's vertical speed on contact.
+    const wasAirborne = this.airborne;
     let gq = track.query(this.x, this.z, this.trackIndex);
     let ground = gq.gap ? track.pitFloor : gq.height;
     if (!gq.gap && this.y < ground - CLIFF_HEIGHT) {
@@ -553,6 +558,12 @@ export class Car {
       this.airborne = false;
     } else {
       this.airborne = this.y - ground > 0.15;
+    }
+    // Time in the air counts once the flight ends in a landing (touching down, or settling onto a ramp's slope).
+    if (this.airborne) this.airTime += dt;
+    else {
+      if (wasAirborne && !this.wrecked && this.airTime >= MIN_FLIGHT) this.airSeconds += this.airTime;
+      this.airTime = 0;
     }
 
     // Visual pitch: follow the road under the front/rear wheels, or the flight path in the air.

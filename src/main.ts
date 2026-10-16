@@ -625,7 +625,7 @@ function raceKeys(): void {
 function currentScore(): ScoreBreakdown {
   const position = race.standings(allCars, track).indexOf(car) + 1;
   const destroyed = rivals.filter((r) => r.car.wrecked && r.car.killedBy === car).length;
-  return scoreRace(position, allCars.length, destroyed, raceLapRecords, bestLapThisRace);
+  return scoreRace(position, allCars.length, destroyed, raceLapRecords, bestLapThisRace, car.driftScore + (car.wrecked ? 0 : car.driftCombo), car.airSeconds);
 }
 
 function bannerText(): string {
@@ -643,6 +643,8 @@ function bannerText(): string {
       `Place ${sc.position}`.padEnd(22) + `+${sc.placement}`,
       `Destroyed ${sc.destroyed} x 50`.padEnd(22) + `+${sc.destroyedPoints}`,
       `Lap records ${sc.lapRecords} x 10`.padEnd(22) + `+${sc.lapRecordPoints}`,
+      'Drifting'.padEnd(22) + `+${sc.driftPoints}`,
+      `Air time ${sc.airSeconds.toFixed(1)} s`.padEnd(22) + `+${sc.airPoints}`,
     ];
     const best = sc.bestLap !== null ? `Best lap ${formatTime(sc.bestLap)}\n` : '';
     return `${car.wrecked ? 'WRECKED' : 'FINISHED'}\n\n${rows.join('\n')}\n\nSCORE\n${points.join('\n')}\n${best}TOTAL ${sc.total}${careerGame ? '' : ' (training: not saved)'}\n\n${careerGame ? `Cash picked up: $${raceCash}\n` : ''}Enter: continue · R: restart · Esc: quit`;
