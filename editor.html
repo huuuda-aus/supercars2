@@ -20,8 +20,12 @@
     input[type=range] { width: 100%; }
     .row { display: flex; gap: 6px; flex-wrap: wrap; }
     .row > * { flex: 1; }
-    button { font: inherit; color: #fff; padding: 6px 8px; background: #26302a; border: 1px solid #3c483f; border-radius: 5px; cursor: pointer; }
-    button:hover:not(:disabled) { border-color: #f0a030; }
+    button { font: inherit; color: #fff; padding: 6px 8px; background: #26302a; border: 1px solid #3c483f; border-radius: 0; cursor: pointer; position: relative; overflow: hidden; --flag-w: 30px; --flag-sq: 7.5px; }
+    button::before, button::after { content: ''; position: absolute; top: 0; bottom: 0; width: var(--flag-w); pointer-events: none; opacity: 0; transition: opacity 0.15s; background: repeating-conic-gradient(#f4f4f4 0% 25%, #151515 0% 50%) 0 0 / calc(var(--flag-sq) * 2) calc(var(--flag-sq) * 2); }
+    button::before { left: 0; -webkit-mask-image: linear-gradient(to right, #000, transparent); mask-image: linear-gradient(to right, #000, transparent); }
+    button::after { right: 0; -webkit-mask-image: linear-gradient(to left, #000, transparent); mask-image: linear-gradient(to left, #000, transparent); }
+    button:hover:not(:disabled)::before, button:hover:not(:disabled)::after, button:focus-visible::before, button:focus-visible::after { opacity: 0.9; }
+    button:hover:not(:disabled) { border-color: #fff; }
     button:disabled { opacity: 0.4; cursor: default; }
     button.on { background: #6b4210; border-color: #f0a030; }
     button.primary { background: #a85414; border-color: #ffbe5c; }
