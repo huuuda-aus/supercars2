@@ -20,9 +20,10 @@ The file name is the car **style**. One file per style:
 
 | File in `public/models/` | Used by |
 |---|---|
-| `beetle.glb` | **Bug**, one of the three cars you pick at the start of a new game |
-| `jeep.glb` | **Crawler**, one of the three starter cars |
-| `hatch.glb` | **Commuter**, one of the three starter cars, and the Yellow and Purple rival cars |
+| `beetle.glb` | **Bug**, one of the four cars you pick at the start of a new game |
+| `jeep.glb` | **Crawler**, one of the four starter cars |
+| `hatch.glb` | **Commuter**, one of the four starter cars, and the Yellow and Purple rival cars |
+| `lada.glb` | **Lada**, one of the four starter cars |
 | `coupe.glb` | the Green and White rivals |
 | `sedan.glb` | the Blue, Orange and Cyan rivals |
 

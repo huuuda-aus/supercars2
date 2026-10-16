@@ -9,7 +9,7 @@ import { Gauges } from './gauges';
 import { Minimap } from './minimap';
 import { Popups } from './popups';
 import { PICKUP_COLOURS, Pickups } from './pickups';
-import { buildCarModel, loadCustomCarModels } from './carmodel';
+import { buildCarModel, loadCustomCarModels, setupCarReflections } from './carmodel';
 import { cleanName, loadGame, loadSettings, newGame, prizeFor, saveGame, saveSettings, type SaveGame } from './save';
 import { Screens } from './screens';
 import { scoreRace, type ScoreBreakdown } from './score';
@@ -36,6 +36,7 @@ renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 document.body.prepend(renderer.domElement);
+setupCarReflections(renderer);
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x3d6a37);
@@ -214,6 +215,7 @@ function gridSlot(slot: number): { index: number; lane: number } {
 }
 
 function resetRace(): void {
+  snapCamera = true;
   smoke.clear();
   fire.clear();
   raceCash = 0;
@@ -258,6 +260,9 @@ function resize(): void {
 addEventListener('resize', resize);
 resize();
 
+const CAMERA_FOLLOW = 2.2; // how fast the third-person camera swings round behind the car (per second): lower is lazier
+let camHeading = 0; // the direction the third-person camera is behind the car, trailing the car's own heading
+let snapCamera = true; // jump straight behind the car on the next frame (race start, restart)
 let chaseHeight = 5; // how high the third-person camera sits above the car (lowered under bridges)
 
 function updateCamera(dt: number): void {
@@ -271,18 +276,23 @@ function updateCamera(dt: number): void {
     ortho.lookAt(car.x, 0, car.z);
   } else {
     const back = 10;
+    if (snapCamera) camHeading = car.heading;
+    snapCamera = false;
+    // Swing round behind the car like on a rubber band: close a fraction of the angle each frame, the short way round.
+    const turn = Math.atan2(Math.sin(car.heading - camHeading), Math.cos(car.heading - camHeading));
+    camHeading += turn * (1 - Math.exp(-CAMERA_FOLLOW * dt));
     // Under a bridge, duck below its deck so the car stays in view: look along the whole line from the car back to
     // the camera for anything overhead, and sit just beneath the lowest of it.
     let ceiling = Infinity;
     for (const f of [0, 0.35, 0.7, 1]) {
-      ceiling = Math.min(ceiling, track.ceilingAt(car.x - Math.sin(car.heading) * back * f, car.z - Math.cos(car.heading) * back * f, car.y + 0.5));
+      ceiling = Math.min(ceiling, track.ceilingAt(car.x - Math.sin(camHeading) * back * f, car.z - Math.cos(camHeading) * back * f, car.y + 0.5));
     }
     const wanted = Math.max(1.8, Math.min(5, ceiling - car.y - 0.6));
     chaseHeight += (wanted - chaseHeight) * Math.min(1, dt * 6);
     chase.position.set(
-      car.x - Math.sin(car.heading) * back,
+      car.x - Math.sin(camHeading) * back,
       car.y + chaseHeight,
-      car.z - Math.cos(car.heading) * back,
+      car.z - Math.cos(camHeading) * back,
     );
     chase.lookAt(car.x, car.y + 1, car.z);
   }
@@ -641,27 +651,40 @@ function currentScore(): ScoreBreakdown {
 
 function bannerText(): string {
   if (race.state === 'countdown') return `${Math.ceil(race.countdown)}\n\nhold ↑ to rev`;
-  if (car.finished || car.wrecked) {
-    const standings = race.standings(allCars, track);
-    const width = Math.max(7, ...standings.map((c) => c.name.length));
-    const rows = standings.map((c, i) => {
-      const t = c.finished ? formatTime(c.finishTime) : c.wrecked ? 'wrecked' : 'racing…';
-      const prize = careerGame ? `  $${prizeFor(i + 1)}` : '';
-      return `${i + 1}. ${c.name.padEnd(width)} ${t.padEnd(8)}${prize}${c === car ? '  <' : ''}`;
-    });
-    const sc = currentScore();
-    const points = [
-      `Place ${sc.position}`.padEnd(22) + `+${sc.placement}`,
-      `Destroyed ${sc.destroyed} x 50`.padEnd(22) + `+${sc.destroyedPoints}`,
-      `Lap records ${sc.lapRecords} x 10`.padEnd(22) + `+${sc.lapRecordPoints}`,
-      'Drifting'.padEnd(22) + `+${sc.driftPoints}`,
-      `Air time ${sc.airSeconds.toFixed(1)} s`.padEnd(22) + `+${sc.airPoints}`,
-    ];
-    const best = sc.bestLap !== null ? `Best lap ${formatTime(sc.bestLap)}\n` : '';
-    return `${car.wrecked ? 'WRECKED' : 'FINISHED'}\n\n${rows.join('\n')}\n\nSCORE\n${points.join('\n')}\n${best}TOTAL ${sc.total}${careerGame ? '' : ' (training: not saved)'}\n\n${careerGame ? `Cash picked up: $${raceCash}\n` : ''}Enter: continue · R: restart · Esc: quit`;
-  }
-  return race.time < 1 ? 'GO!' : '';
+  return race.time < 1 && !(car.finished || car.wrecked) ? 'GO!' : '';
 }
+
+const escapeHtml = (text: string): string => text.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
+
+/** After-race screen as HTML tables (standings, then score), or null while the race is still on. */
+function resultHtml(): string | null {
+  if (race.state === 'countdown' || !(car.finished || car.wrecked)) return null;
+  const standings = race.standings(allCars, track);
+  const rows = standings
+    .map((c, i) => {
+      const t = c.finished ? formatTime(c.finishTime) : c.wrecked ? 'wrecked' : 'racing…';
+      const prize = careerGame ? `<td class="num">$${prizeFor(i + 1)}</td>` : '';
+      return `<tr${c === car ? ' class="me"' : ''}><td class="num">${i + 1}</td><td>${escapeHtml(c.name)}</td><td class="num">${t}</td>${prize}</tr>`;
+    })
+    .join('');
+  const sc = currentScore();
+  const points: [string, string, number][] = [
+    [`Place ${sc.position}`, '', sc.placement],
+    ['Destroyed', `${sc.destroyed} x 50`, sc.destroyedPoints],
+    ['Lap records', `${sc.lapRecords} x 10`, sc.lapRecordPoints],
+    ['Drifting', '', sc.driftPoints],
+    ['Air time', `${sc.airSeconds.toFixed(1)} s`, sc.airPoints],
+  ];
+  const pointRows = points.map(([label, detail, value]) => `<tr><td>${label}</td><td class="num">${detail}</td><td class="num">+${value}</td></tr>`).join('');
+  const best = sc.bestLap !== null ? `<tr><td>Best lap</td><td class="num">${formatTime(sc.bestLap)}</td><td></td></tr>` : '';
+  const head = careerGame ? '<th>#</th><th>Driver</th><th>Time</th><th>Prize</th>' : '<th>#</th><th>Driver</th><th>Time</th>';
+  return `<div class="result"><h2>${car.wrecked ? 'WRECKED' : 'FINISHED'}</h2>
+<table><thead><tr>${head}</tr></thead><tbody>${rows}</tbody></table>
+<table><thead><tr><th>Score</th><th></th><th>Points</th></tr></thead><tbody>${pointRows}${best}<tr class="total"><td>Total</td><td></td><td class="num">${sc.total}</td></tr></tbody></table>
+<p>${careerGame ? `Cash picked up: $${raceCash}` : 'Training: not saved'}</p><p class="keys">Enter: continue · R: restart · Esc: quit</p></div>`;
+}
+
+let lastResultHtml = '';
 
 function frame(now: number): void {
   if (mode === 'menu') {
@@ -761,7 +784,13 @@ function frame(now: number): void {
   updateHealthBar();
   audio.update(race.state === 'racing' || race.state === 'countdown', car, rivals.map((r) => r.car));
   gauges.update(car.rpm, car.gear, car.speed * 3.6);
-  banner.textContent = bannerText();
+  const result = resultHtml();
+  if (result !== null) {
+    if (result !== lastResultHtml) banner.innerHTML = lastResultHtml = result;
+  } else {
+    lastResultHtml = '';
+    banner.textContent = bannerText();
+  }
   requestAnimationFrame(frame);
 }
 loadTrack(TRACK_LIST[0]);

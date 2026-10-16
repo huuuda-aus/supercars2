@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { WHEEL_R, WHEEL_X, WHEEL_Z } from './spec';
 
-export type CarStyle = 'coupe' | 'sedan' | 'hatch' | 'beetle' | 'jeep';
+export type CarStyle = 'coupe' | 'sedan' | 'hatch' | 'beetle' | 'jeep' | 'lada';
 
 export interface CarModel {
   group: THREE.Group;
@@ -41,6 +41,8 @@ const STYLES: Record<CarStyle, StyleSpec> = {
   sedan: { cabin: [[0.95, BELT], [-1.3, BELT], [-0.85, 1.4], [0.35, 1.42]], spoiler: false, lowNose: 0.02 },
   // Short hatchback with a tall tail (a Corolla-style five-door).
   hatch: { cabin: [[0.95, BELT], [-1.8, BELT], [-1.5, 1.47], [0.4, 1.49]], spoiler: false, lowNose: 0.04 },
+  // Boxy saloon (the Lada's built-in fallback if public/models/lada.glb is missing).
+  lada: { cabin: [[0.95, BELT], [-1.3, BELT], [-0.9, 1.4], [0.4, 1.42]], spoiler: false, lowNose: 0.02 },
   // Rounded bug: short sloping bonnet and tail, a domed painted roof, bulging fenders, round bulb headlights.
   beetle: {
     cabin: [[0.85, 1.05], [-1.35, 1.05], [-1.25, 1.36], [-0.8, 1.68], [-0.1, 1.77], [0.45, 1.62], [0.75, 1.3]],
@@ -134,8 +136,67 @@ function buildWheel(rimColor: number): THREE.Group {
   return wheel;
 }
 
-/** Procedural car: painted body with wheel arches, glass cabin, lights, grille, mirrors, rolling wheels. */
+// --- Reflections -----------------------------------------------------------------------------------------------
+
+let reflections: THREE.Texture | null = null;
+const REFLECTION_STRENGTH = 0.45; // envMapIntensity of the car materials
+const SUN_BOOST = 3; // how much brighter than the sky the sun and the softboxes are (they make the highlights)
+
+/**
+ * Build the reflection map shared by every car: a small made-up outdoor scene (sky gradient, bright sun, long
+ * light panels, dark ground) baked into a prefiltered cube map. Call once with the renderer, before cars are built.
+ */
+export function setupCarReflections(renderer: THREE.WebGLRenderer): void {
+  const env = new THREE.Scene();
+  const dome = new THREE.SphereGeometry(50, 32, 16);
+  const colours: number[] = [];
+  const top = new THREE.Color(0x5a9be0);
+  const horizon = new THREE.Color(0xe6f0fa);
+  const ground = new THREE.Color(0x2c3328);
+  const pos = dome.getAttribute('position');
+  for (let i = 0; i < pos.count; i++) {
+    const h = pos.getY(i) / 50;
+    const c = h >= 0 ? horizon.clone().lerp(top, Math.pow(h, 0.6)) : horizon.clone().lerp(ground, Math.min(1, -h * 4));
+    colours.push(c.r, c.g, c.b);
+  }
+  dome.setAttribute('color', new THREE.Float32BufferAttribute(colours, 3));
+  env.add(new THREE.Mesh(dome, new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.BackSide })));
+  const bright = (scale: number) => new THREE.MeshBasicMaterial({ color: new THREE.Color(1, 0.96, 0.88).multiplyScalar(scale), side: THREE.DoubleSide });
+  const panel = (w: number, h: number, x: number, y: number, z: number) => {
+    const m = new THREE.Mesh(new THREE.PlaneGeometry(w, h), bright(SUN_BOOST));
+    m.position.set(x, y, z);
+    m.lookAt(0, 0, 0);
+    env.add(m);
+  };
+  panel(14, 14, -22, 32, 18); // the sun
+  panel(40, 3, 0, 20, -38); // long strip lights give the body its streaky highlights
+  panel(40, 3, 0, 20, 38);
+  panel(3, 30, 40, 12, 0);
+  const generator = new THREE.PMREMGenerator(renderer);
+  reflections = generator.fromScene(env, 0.02).texture;
+  generator.dispose();
+  dome.dispose();
+}
+
+/** Build a car in the given colour and style (a Blender model if there is one, else the procedural car), with reflections. */
 export function buildCarModel(color: number, style: CarStyle): CarModel {
+  const model = buildCarModelRaw(color, style);
+  if (reflections) {
+    model.group.traverse((object) => {
+      if (!(object instanceof THREE.Mesh)) return;
+      for (const m of Array.isArray(object.material) ? object.material : [object.material]) {
+        if (m instanceof THREE.MeshStandardMaterial && m.emissiveIntensity <= 1 && !m.transparent) {
+          m.envMap = reflections;
+          m.envMapIntensity = REFLECTION_STRENGTH;
+        }
+      }
+    });
+  }
+  return model;
+}
+
+/** Procedural car: painted body with wheel arches, glass cabin, lights, grille, mirrors, rolling wheels. */
+function buildCarModelRaw(color: number, style: CarStyle): CarModel {
   const custom = templates.get(style);
   if (custom) return instantiateModel(custom, color);
   const group = new THREE.Group();
@@ -143,7 +204,7 @@ export function buildCarModel(color: number, style: CarStyle): CarModel {
   const spinners: THREE.Object3D[] = [];
   const flames: THREE.Object3D[] = [];
 
-  const paint = new THREE.MeshPhysicalMaterial({ color, roughness: 0.4, metalness: 0.15, clearcoat: 0.7, clearcoatRoughness: 0.25 });
+  const paint = new THREE.MeshPhysicalMaterial({ color, roughness: 0.35, metalness: 0.1, clearcoat: 0.8, clearcoatRoughness: 0.12 });
   const glass = new THREE.MeshStandardMaterial({ color: 0x1b2b3a, roughness: 0.12, metalness: 0.3 });
   const trim = new THREE.MeshStandardMaterial({ color: 0x15171a, roughness: 0.7 });
   const headlight = new THREE.MeshStandardMaterial({ color: 0xffffff, emissive: 0xfff1c4, emissiveIntensity: 1.6, roughness: 0.2 });
@@ -274,7 +335,7 @@ export function buildCarModel(color: number, style: CarStyle): CarModel {
 
 const templates = new Map<CarStyle, THREE.Group>();
 const CAR_LENGTH = 4.2; // metres: a loaded model is scaled so its nose-to-tail length is this
-const STYLE_NAMES: CarStyle[] = ['coupe', 'sedan', 'hatch', 'beetle', 'jeep'];
+const STYLE_NAMES: CarStyle[] = ['coupe', 'sedan', 'hatch', 'beetle', 'jeep', 'lada'];
 const WHEEL_NODES = { Wheel_FL: [true, true], Wheel_FR: [true, true], Wheel_RL: [false, true], Wheel_RR: [false, true] } as const;
 
 /**

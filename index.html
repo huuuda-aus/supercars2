@@ -15,6 +15,16 @@
     #hpfill { height: 100%; width: 100%; background: #3fcf5a; }
     #hptext { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: #fff; font: 600 12px var(--font); text-shadow: 0 0 3px #000; }
     #hud { position: fixed; top: 42px; left: 12px; color: #fff; font: 500 12px/1.5 var(--font); text-shadow: 0 0 3px #000; white-space: pre; pointer-events: none; }
+    #banner .result { display: flex; flex-direction: column; align-items: center; gap: 14px; white-space: normal; padding: 18px 26px; background: rgba(10, 14, 12, 0.72); border: 1px solid rgba(255, 255, 255, 0.2); }
+    #banner h2 { margin: 0; font-size: 34px; letter-spacing: 0.1em; }
+    #banner table { border-collapse: collapse; font-size: 17px; min-width: 360px; }
+    #banner th { padding: 4px 14px; text-align: left; font-size: 13px; letter-spacing: 0.12em; color: #f0b050; border-bottom: 1px solid rgba(255, 255, 255, 0.3); }
+    #banner td { padding: 3px 14px; text-align: left; }
+    #banner th:last-child, #banner td.num { text-align: right; }
+    #banner tr.me td { color: #f0b050; background: rgba(240, 160, 48, 0.14); }
+    #banner tr.total td { font-weight: 800; border-top: 1px solid rgba(255, 255, 255, 0.3); }
+    #banner p { margin: 0; font-size: 16px; }
+    #banner p.keys { font-size: 14px; color: #b9bfb2; }
     #banner { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; text-align: center; color: #fff; font: 600 24px/1.4 var(--font); text-shadow: 0 0 6px #000, 0 0 2px #000; white-space: pre; pointer-events: none; }
     #gauges { position: fixed; left: 12px; bottom: 12px; display: flex; gap: 10px; pointer-events: none; }
     .dial { width: min(230px, 24vw); min-width: 150px; filter: drop-shadow(0 2px 6px rgba(0, 0, 0, 0.6)); }
