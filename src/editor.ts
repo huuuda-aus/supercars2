@@ -351,7 +351,7 @@ function render(): void {
     ctx.strokeStyle = CROSSING_COLOUR[c.type];
     ctx.stroke();
     ctx.fillStyle = '#fff';
-    ctx.font = 'bold 11px monospace';
+    ctx.font = '700 11px Orbitron, sans-serif';
     ctx.textAlign = 'center';
     ctx.fillText(String(k + 1), sx, sy + 4);
   });
@@ -889,6 +889,8 @@ addEventListener('beforeunload', (e) => {
 
 // --- Start ------------------------------------------------------------------------------------------------------
 
+// The canvas text needs the pixel font loaded before it is drawn.
+void document.fonts.load('700 11px Orbitron').then(() => draw());
 setTool('move');
 changed(false);
 requestAnimationFrame(() => {

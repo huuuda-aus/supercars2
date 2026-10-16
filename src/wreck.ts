@@ -1,11 +1,9 @@
 import * as THREE from 'three';
 
-const PUFFS = 10;
-const PUFF_LIFE = 2.4; // seconds a smoke puff takes to rise and fade
 
 export interface Wreck {
   group: THREE.Group;
-  /** Animate smoke and embers. */
+  /** Animate the embers. (The smoke is the smoke system's: see smoke.ts.) */
   update(dt: number): void;
 }
 
@@ -27,7 +25,7 @@ function crumple(geo: THREE.BufferGeometry, amount: number, seed: number): THREE
   return geo;
 }
 
-/** Burnt-out, low-poly car hulk (dark grey and black) with a plume of smoke and a few glowing embers. */
+/** Burnt-out, low-poly car hulk (dark grey and black) with a few glowing embers (its plume of smoke comes from the smoke system). */
 export function buildWreck(): Wreck {
   const group = new THREE.Group();
   const flat = (color: number) => new THREE.MeshStandardMaterial({ color, roughness: 0.95, flatShading: true });
@@ -69,39 +67,12 @@ export function buildWreck(): Wreck {
     return e;
   });
 
-  // Smoke: a pool of dark puffs that rise from the engine bay, swell and fade, then start over.
-  const puffGeo = new THREE.IcosahedronGeometry(0.5, 0);
-  const puffs = Array.from({ length: PUFFS }, (_, i) => {
-    const material = new THREE.MeshBasicMaterial({ color: 0x2a2a2d, transparent: true, opacity: 0, depthWrite: false });
-    const mesh = new THREE.Mesh(puffGeo, material);
-    mesh.userData.noShadow = true;
-    group.add(mesh);
-    return { mesh, material, age: (i / PUFFS) * PUFF_LIFE, drift: [0, 0] as [number, number] };
-  });
-  const rerollDrift = (p: (typeof puffs)[number]) => {
-    p.drift = [(Math.random() - 0.5) * 1.6, (Math.random() - 0.5) * 1.6];
-  };
-  puffs.forEach(rerollDrift);
-
   let time = 0;
   return {
     group,
     update(dt: number): void {
       time += dt;
       embers.forEach((e, i) => e.scale.setScalar(0.7 + 0.5 * Math.abs(Math.sin(time * 7 + i * 2.1))));
-      for (const p of puffs) {
-        p.age += dt;
-        if (p.age >= PUFF_LIFE) {
-          p.age -= PUFF_LIFE;
-          rerollDrift(p);
-        }
-        const t = p.age / PUFF_LIFE;
-        p.mesh.position.set(p.drift[0] * t + 0.1, 1.1 + t * 3.8, 1.3 + p.drift[1] * t);
-        p.mesh.scale.setScalar(0.7 + t * 2.2);
-        p.mesh.rotation.y = time * 0.5 + p.age;
-        p.material.opacity = 0.6 * (1 - t) * Math.min(1, t * 6);
-        p.material.color.setScalar(0.12 + 0.2 * t); // fresh smoke is black, thins to grey
-      }
     },
   };
 }

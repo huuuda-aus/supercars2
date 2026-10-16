@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { WHEEL_R, WHEEL_X, WHEEL_Z } from './spec';
 
 export type CarStyle = 'coupe' | 'sedan' | 'hatch' | 'beetle' | 'jeep';
@@ -135,6 +136,8 @@ function buildWheel(rimColor: number): THREE.Group {
 
 /** Procedural car: painted body with wheel arches, glass cabin, lights, grille, mirrors, rolling wheels. */
 export function buildCarModel(color: number, style: CarStyle): CarModel {
+  const custom = templates.get(style);
+  if (custom) return instantiateModel(custom, color);
   const group = new THREE.Group();
   const frontPivots: THREE.Group[] = [];
   const spinners: THREE.Object3D[] = [];
@@ -260,6 +263,109 @@ export function buildCarModel(color: number, style: CarStyle): CarModel {
     flame.visible = false;
     group.add(flame);
     flames.push(flame);
+  }
+  return { group, frontPivots, spinners, flames };
+}
+
+// --- Models made in Blender (or any glTF tool) ----------------------------------------------------------------
+//
+// A file named public/models/<style>.glb replaces the procedural model of that style (beetle, jeep, hatch, coupe,
+// sedan). docs/replacing-car-models.md says how to make one. Styles with no file keep the procedural model.
+
+const templates = new Map<CarStyle, THREE.Group>();
+const CAR_LENGTH = 4.2; // metres: a loaded model is scaled so its nose-to-tail length is this
+const STYLE_NAMES: CarStyle[] = ['coupe', 'sedan', 'hatch', 'beetle', 'jeep'];
+const WHEEL_NODES = { Wheel_FL: [true, true], Wheel_FR: [true, true], Wheel_RL: [false, true], Wheel_RR: [false, true] } as const;
+
+/**
+ * Look for public/models/<style>.glb for every style and load the ones that exist. Call once, before any car is
+ * built. Returns the styles that were replaced. A missing or broken file is skipped (with a warning), never fatal.
+ */
+export async function loadCustomCarModels(): Promise<CarStyle[]> {
+  const loaded: CarStyle[] = [];
+  const loader = new GLTFLoader();
+  await Promise.all(
+    STYLE_NAMES.map(async (style) => {
+      try {
+        const response = await fetch(`models/${style}.glb`);
+        if (!response.ok) return;
+        const data = await response.arrayBuffer();
+        // A dev server answers an unknown path with its index page: only a real binary glTF starts with "glTF".
+        if (data.byteLength < 12 || new DataView(data).getUint32(0, true) !== 0x46546c67) return;
+        const gltf = await loader.parseAsync(data, '');
+        registerCarModel(style, gltf.scene);
+        loaded.push(style);
+      } catch (error) {
+        console.warn(`models/${style}.glb could not be used:`, error);
+      }
+    }),
+  );
+  if (loaded.length) console.info('Custom car models loaded:', loaded.join(', '));
+  return loaded;
+}
+
+/** Use a loaded glTF scene as the model for a style (what loadCustomCarModels does for each file it finds). */
+export function registerCarModel(style: CarStyle, scene: THREE.Group): void {
+  templates.set(style, normaliseModel(scene, style));
+}
+
+/** Scale a model to the car's length, centre it between the wheels and stand it on the ground (y = 0). */
+function normaliseModel(scene: THREE.Group, style: CarStyle): THREE.Group {
+  const box = new THREE.Box3().setFromObject(scene);
+  const size = box.getSize(new THREE.Vector3());
+  const scale = size.z > 0 ? CAR_LENGTH / size.z : 1;
+  if (Math.abs(scale - 1) > 0.15) console.warn(`models/${style}.glb is ${size.z.toFixed(2)} m long: scaled by ${scale.toFixed(2)} to ${CAR_LENGTH} m. Check the units and the nose direction (+Z).`);
+  const holder = new THREE.Group();
+  holder.add(scene);
+  scene.scale.multiplyScalar(scale);
+  const fitted = new THREE.Box3().setFromObject(holder);
+  const centre = fitted.getCenter(new THREE.Vector3());
+  scene.position.set(-centre.x, -fitted.min.y, -centre.z);
+  holder.name = `custom-${style}`;
+  return holder;
+}
+
+/** Make a car from a loaded model: its own copy, the paint material tinted, wheels and flames hooked up. */
+function instantiateModel(template: THREE.Group, color: number): CarModel {
+  const group = template.clone(true);
+  const frontPivots: THREE.Group[] = [];
+  const spinners: THREE.Object3D[] = [];
+  const flames: THREE.Object3D[] = [];
+  group.traverse((object) => {
+    if (!(object instanceof THREE.Mesh)) return;
+    // Each car gets its own materials, so painting one does not repaint the rest.
+    const own = (m: THREE.Material) => {
+      const copy = m.clone();
+      if (/^paint|^body/i.test(copy.name) && 'color' in copy) (copy as THREE.MeshStandardMaterial).color.set(color);
+      return copy;
+    };
+    object.material = Array.isArray(object.material) ? object.material.map(own) : own(object.material);
+  });
+  for (const [name, [front]] of Object.entries(WHEEL_NODES)) {
+    const wheel = group.getObjectByName(name);
+    if (!wheel || !wheel.parent) {
+      console.warn(`The model has no node called ${name}: that wheel will not turn.`);
+      continue;
+    }
+    spinners.push(wheel);
+    if (front) {
+      // Steering turns a pivot at the wheel's centre; the wheel inside it keeps rolling.
+      const pivot = new THREE.Group();
+      pivot.position.copy(wheel.position);
+      pivot.quaternion.copy(wheel.quaternion);
+      wheel.parent.add(pivot);
+      pivot.add(wheel);
+      wheel.position.set(0, 0, 0);
+      wheel.quaternion.identity();
+      frontPivots.push(pivot);
+    }
+  }
+  for (const name of ['Flame_L', 'Flame_R']) {
+    const flame = group.getObjectByName(name);
+    if (flame) {
+      flame.visible = false;
+      flames.push(flame);
+    }
   }
   return { group, frontPivots, spinners, flames };
 }

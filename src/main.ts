@@ -9,7 +9,7 @@ import { Gauges } from './gauges';
 import { Minimap } from './minimap';
 import { Popups } from './popups';
 import { PICKUP_COLOURS, Pickups } from './pickups';
-import { buildCarModel } from './carmodel';
+import { buildCarModel, loadCustomCarModels } from './carmodel';
 import { cleanName, loadGame, loadSettings, newGame, prizeFor, saveGame, saveSettings, type SaveGame } from './save';
 import { Screens } from './screens';
 import { scoreRace, type ScoreBreakdown } from './score';
@@ -18,13 +18,18 @@ import { allTracks, THEMES, trackForRace, TRACK_LIST, type Theme, type TrackDef 
 import { formatTime, Race } from './race';
 import { applyGroundUVs, createTrees, makeGroundTexture } from './scenery';
 import { Skidmarks } from './skidmarks';
+import { FireSystem } from './fire';
 import { Sky } from './sky';
+import { SmokeSystem } from './smoke';
 import { Track } from './track';
 import { aiStats, MAX_UPGRADE_LEVEL, RIVAL_CAR_TIER, starterStats, statsFor, upgradePrice, type UpgradeSlot } from './upgrades';
 import { Weapons } from './weapons';
 
 const STEP = 1 / 120; // fixed physics timestep, independent of display refresh rate
 const ORTHO_SIZE = 45; // visible world units vertically in top-down mode
+
+// Cars made in Blender (public/models/<style>.glb) replace the built-in models; load them before any car is built.
+await loadCustomCarModels();
 
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
@@ -60,6 +65,10 @@ function shade(obj: THREE.Object3D, cast: boolean, receive: boolean): void {
 
 const sky = new Sky();
 scene.add(sky.group);
+const smoke = new SmokeSystem(); // smoke from damaged engines
+scene.add(smoke.group);
+const fire = new FireSystem(); // flames at the front of a car that is nearly dead
+scene.add(fire.group);
 
 const groundTextures = new Map<Theme, THREE.CanvasTexture>();
 function groundTexture(theme: Theme): THREE.CanvasTexture {
@@ -205,6 +214,8 @@ function gridSlot(slot: number): { index: number; lane: number } {
 }
 
 function resetRace(): void {
+  smoke.clear();
+  fire.clear();
   raceCash = 0;
   raceLapRecords = 0;
   bestLapThisRace = null;
@@ -727,6 +738,12 @@ function frame(now: number): void {
     ...weapons.mines.map((m) => ({ x: m.x, z: m.z, color: '#ff3020', size: 2.6 })),
   ]);
   updateCamera(frameTime);
+  for (const c of allCars) {
+    smoke.emit(c, frameTime);
+    fire.emit(c, frameTime);
+  }
+  smoke.update(frameTime);
+  fire.update(frameTime);
   sky.update(frameTime, (useOrtho ? ortho : chase).position);
   renderer.render(scene, useOrtho ? ortho : chase);
   const place = race.standings(allCars, track).indexOf(car) + 1;

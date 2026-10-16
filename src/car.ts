@@ -132,8 +132,18 @@ const HS_LOSS = 0.22; // rear grip lost at full effect (stock tyres)
  */
 const SLIDE_SCRUB_FROM = 0.25;
 const SLIDE_SCRUB_RANGE = 0.45;
-const SLIDE_SCRUB = 3;
+const SLIDE_SCRUB = 2.2;
 const SLIDE_SCRUB_POWER_RELIEF = 0.7; // fraction of the scrub removed at full throttle
+
+/**
+ * Counter-steering: when the wheel is turned into a slide (towards where the car is actually going), the front tyres
+ * get their grip back and the car gets extra help rotating back in line, and the sideways scrub is relieved so the car
+ * does not simply scrub to a halt before the driver has caught it. All of it scales with how far the wheel is turned
+ * into the slide, so a driver who does nothing gets none of it.
+ */
+const COUNTER_YAW = 9; // rad/s^2 of help turning the car back in line, at full wheel and a big slide angle
+const COUNTER_SCRUB_RELIEF = 0.8; // fraction of the sideways scrub removed at full counter-steer
+const COUNTER_BREAKAWAY = 2; // how many times faster the tail's lost grip returns at full counter-steer
 
 /** Hands off the wheel in a slide: the car straightens itself with this yaw acceleration (rad/s^2 per rad of body slip). */
 const DRIFT_CATCH = 9;
@@ -199,6 +209,7 @@ export class Car {
   // Weapons, damage and nitro.
   ammo = { ...START_LOADOUT };
   health: number;
+  wreckedFor = 0; // seconds since it was wrecked
   wrecked = false; // destroyed for good: stays on the track as a smoking hulk until the race is reset
   justWrecked = false; // set when destroyed; the weapons system turns it into an explosion
   nitroTimer = 0;
@@ -303,6 +314,7 @@ export class Car {
     this.nitroTimer = 0;
     this.shieldTimer = 0;
     this.lastAttacker = this.killedBy = null;
+    this.wreckedFor = 0;
     this.attackTimer = 0;
     this.roll = this.rollRate = 0;
     this.showWreck(false);
@@ -401,6 +413,7 @@ export class Car {
 
   private wreckNow(): void {
     this.wrecked = true;
+    this.wreckedFor = 0;
     this.justWrecked = true;
     this.nitroTimer = 0;
     this.showWreck(true);
@@ -475,6 +488,7 @@ export class Car {
     this.landSkid = Math.max(0, this.landSkid - dt);
     this.shieldTimer = Math.max(0, this.shieldTimer - dt);
     this.attackTimer = Math.max(0, this.attackTimer - dt);
+    if (this.wrecked) this.wreckedFor += dt;
     this.oilTimer = Math.max(0, this.oilTimer - dt);
     if (this.wrecked) this.wreck.update(dt);
     const prevX = this.x;
@@ -760,8 +774,15 @@ export class Car {
     this.omega = w + ((WHEEL_Z * fyFront - WHEEL_Z * fRear) / INERTIA) * dt;
     this.omega *= Math.exp(-YAW_DAMPING * dt);
     const slip = Math.abs(Math.atan2(this.vl, Math.max(Math.abs(this.vf), 1)));
-    // Power keeps a slide going (and keeps the speed up), so the scrub fades with the throttle.
-    const scrub = SLIDE_SCRUB * (1 - SLIDE_SCRUB_POWER_RELIEF * this.throttleState);
+    // Turning the wheel into the slide (counter-steering) is how a driver catches a spin: see COUNTER_YAW.
+    const slideSign = Math.sign(Math.atan2(this.vl, Math.max(Math.abs(this.vf), 1)));
+    const counter = slip > 0.25 ? Math.max(0, this.steerState * slideSign) : 0;
+    if (counter > 0) {
+      this.omega += slideSign * COUNTER_YAW * counter * Math.min(slip, 1) * dt;
+      this.breakaway = Math.max(0, this.breakaway - dt * COUNTER_BREAKAWAY * counter);
+    }
+    // Power keeps a slide going (and keeps the speed up), so the scrub fades with the throttle (and with counter-steer).
+    const scrub = SLIDE_SCRUB * (1 - SLIDE_SCRUB_POWER_RELIEF * this.throttleState) * (1 - COUNTER_SCRUB_RELIEF * counter);
     this.vl *= Math.exp(-scrub * Math.min(1, Math.max(0, (slip - SLIDE_SCRUB_FROM) / SLIDE_SCRUB_RANGE)) * dt);
     if (slip > DRIFT_STABILIZE_FROM) this.omega *= Math.exp(-DRIFT_STABILIZE * (slip - DRIFT_STABILIZE_FROM) * dt);
     // Let go of the steering in a slide and the car straightens itself (a tap of the handbrake is then a flick, not a

@@ -1,4 +1,5 @@
 import type { UiSound } from './audio';
+import titleImage from './assets/title.png';
 import { GARAGE, PALETTE, type CarId } from './garage';
 import { MAX_NAME_LENGTH, type SaveGame } from './save';
 import { loadRecords } from './records';
@@ -134,7 +135,14 @@ export class Screens {
 
   showTitle(o: { canResume: boolean; onNew: Handler; onResume: Handler; onTraining: Handler; onSettings: Handler }): void {
     const page = el('div', 'screen centre');
-    page.append(el('h1', 'logo', 'SUPER CARS'), el('p', 'tagline', 'Race. Wreck. Upgrade. Repeat.'));
+    // The title picture is a full 1920 x 1080 canvas with the lettering in the middle: crop to the lettering (CSS).
+    const logo = el('div', 'logo-crop');
+    const picture = el('img');
+    picture.src = titleImage;
+    picture.alt = 'Super Cars';
+    picture.draggable = false;
+    logo.append(picture);
+    page.append(logo, el('p', 'tagline', 'Race. Wreck. Upgrade. Repeat.'));
     const menu = el('div', 'menu');
     menu.append(
       this.button('New game', o.onNew),
@@ -143,7 +151,7 @@ export class Screens {
       this.button('Hall of fame', () => {}, { disabled: true, hint: 'coming soon' }),
       this.button('Settings', o.onSettings),
     );
-    page.append(menu);
+    page.append(menu, el('p', 'credit', 'Font: Orbitron (SIL Open Font License)'));
     this.open(page);
   }
 
