@@ -108,13 +108,13 @@ let playerStats = starterStats();
 let playerName = 'You';
 let car = new Car(playerName, 0xd8352a, playerStats, 'hatch');
 const rivals = [
-  new Car('Blue', 0x3070e0, undefined, 'sedan'),
-  new Car('Yellow', 0xe0c030, undefined, 'hatch'),
-  new Car('Green', 0x30c060, undefined, 'coupe'),
-  new Car('Orange', 0xe07820, undefined, 'sedan'),
-  new Car('Purple', 0x9040d0, undefined, 'hatch'),
-  new Car('White', 0xe8e8e8, undefined, 'coupe'),
-  new Car('Cyan', 0x30c8d0, undefined, 'sedan'),
+  new Car('Ayrton Senna', 0x3070e0, undefined, 'sedan'),
+  new Car('Michael Schumacher', 0xe0c030, undefined, 'hatch'),
+  new Car('Juan Manuel Fangio', 0x30c060, undefined, 'coupe'),
+  new Car('Niki Lauda', 0xe07820, undefined, 'sedan'),
+  new Car('Alain Prost', 0x9040d0, undefined, 'hatch'),
+  new Car('Jim Clark', 0xe8e8e8, undefined, 'coupe'),
+  new Car('Stirling Moss', 0x30c8d0, undefined, 'sedan'),
 ].map((car) => ({ car, ai: undefined as unknown as AiDriver }));
 const allCars = [car, ...rivals.map((r) => r.car)];
 allCars.forEach((c) => {
@@ -146,12 +146,13 @@ function loadTrack(def: TrackDef): void {
   minimap?.destroy();
 
   track = new Track(def);
-  circuitObjects = [track.mesh, track.centreLine, track.kerbs, track.finishLine, track.walls, track.terrain, track.pit, track.deck];
+  circuitObjects = [track.mesh, track.centreLine, track.kerbs, track.finishLine, track.jumpMarks, track.walls, track.terrain, track.pit, track.deck];
   scene.add(...circuitObjects);
   shade(track.mesh, true, true);
   shade(track.centreLine, false, true);
   shade(track.kerbs, false, true);
   shade(track.finishLine, false, true);
+  shade(track.jumpMarks, false, true);
   shade(track.pit, false, true);
   shade(track.deck, true, true);
   shade(track.walls, true, true);
@@ -300,6 +301,9 @@ function updateCamera(dt: number): void {
 
 const input = new Input();
 const hud = document.getElementById('hud')!;
+const raceInfo = document.getElementById('raceinfo')!;
+const placeEl = document.getElementById('place')!;
+const lapTimeEl = document.getElementById('laptime')!;
 const gauges = new Gauges();
 const audio = new GameAudio();
 const popups = new Popups();
@@ -385,7 +389,7 @@ let trainingList: TrackDef[] = TRACK_LIST; // the circuits on offer in training,
 function setRaceUi(on: boolean): void {
   raceUiVisible = on;
   const display = on ? '' : 'none';
-  hud.style.display = hpBar.style.display = banner.style.display = display;
+  hud.style.display = raceInfo.style.display = hpBar.style.display = banner.style.display = display;
   minimap.setVisible(on);
   gauges.setVisible(on);
 }
@@ -771,8 +775,10 @@ function frame(now: number): void {
   renderer.render(scene, useOrtho ? ortho : chase);
   const place = race.standings(allCars, track).indexOf(car) + 1;
   const lap = Math.max(1, Math.min(car.lap, race.totalLaps));
+  placeEl.textContent = `${place}/${allCars.length}`;
+  const pad2 = (n: number) => String(n).padStart(2, '0');
+  lapTimeEl.textContent = `lap ${pad2(lap)}/${pad2(race.totalLaps)}\n${formatTime(race.time)}`;
   hud.textContent =
-    `P${place}/${allCars.length}   lap ${lap}/${race.totalLaps}   ${formatTime(race.time)}\n` +
     `height ${car.y.toFixed(1)}${car.airborne ? '  AIR' : ''}${car.drifting ? `  DRIFT ${Math.round(car.driftCombo)}` : ''}${car.offroad ? '  OFFROAD' : ''}${car.nitroActive ? '  NITRO' : ''}${car.shieldTimer > 0 ? `  SHIELD ${Math.ceil(car.shieldTimer)}s` : ''}${weaponsEnabled && race.state === 'racing' && race.weaponsLockedFor > 0 ? `  WEAPONS LOCKED ${Math.ceil(race.weaponsLockedFor)}s` : ''}\n` +
     `${weaponsEnabled ? `[Z] missile ${car.ammo.missiles} · [B] rear ${car.ammo.rearMissiles} · [F] gun ${car.ammo.bullets} · [X] mine ${car.ammo.mines} · [O] oil ${car.ammo.oil} · ` : 'weapons off · '}[Shift] nitro ${car.ammo.nitro}\n` +
     `drift pts ${Math.round(car.driftScore)}${pickupMsgTime > 0 ? `   ${pickupMsg}` : ''}\n` +

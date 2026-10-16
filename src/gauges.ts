@@ -72,7 +72,7 @@ class Dial {
   }
 }
 
-/** The two semicircular dials in the bottom-left corner: engine revs (with the gear) and road speed. */
+/** The two semicircular dials at the bottom corners: engine revs (with the gear) on the left, road speed on the right. */
 export class Gauges {
   private readonly root = document.createElement('div');
   private readonly rpm = new Dial({ title: 'x1000 rpm', max: 8, majorStep: 1, minorStep: 0.5, labelOf: (v) => String(v), redFrom: 6.5 });

@@ -96,6 +96,15 @@ const BRIDGE_DECK = 0.9; // thickness of the slab under the road
  * foot, steepening to the lip) so a long ramp is not absurdly tall: the slope falls off as
  * (1 - u/length)^p with u the distance from the lip, and p follows from the height.
  */
+// Markings on the jump (metres).
+const JUMP_MARK_LIFT = 0.05; // above the road surface
+const JUMP_EDGE_LINE = 0.7; // depth of the white line, flush with the end of each ramp
+const JUMP_ARROWS = 4; // chevrons on the up ramp
+const JUMP_ARROW_FIRST = 1.5; // from the foot of the ramp to the back of the first chevron
+const JUMP_ARROW_SPACING = 4.5; // from one chevron to the next
+const JUMP_ARROW_LENGTH = 2.6; // how far the tip is ahead of the arms
+const JUMP_ARROW_WIDTH = 6; // each arm reaches this far to the side of the middle: the chevron is twice this wide
+const JUMP_ARROW_THICKNESS = 0.9;
 const JUMP = { x: 0, z: 0, height: 8, length: 20, lipSlope: 1.7 };
 
 export class Track {
@@ -111,6 +120,7 @@ export class Track {
   readonly kerbs: THREE.Mesh;
   readonly terrain: THREE.Mesh;
   readonly finishLine: THREE.Mesh;
+  readonly jumpMarks: THREE.Mesh;
   readonly pit: THREE.Mesh;
   readonly spacing: number; // average distance between samples along the ground (m)
   readonly pitFloor = -0.05;
@@ -191,6 +201,7 @@ export class Track {
     this.pit = this.buildPit();
     this.deck = this.buildDeck();
     this.finishLine = this.buildFinishLine();
+    this.jumpMarks = this.buildJumpMarks();
   }
 
   private addRolling(from: number, to: number): void {
@@ -496,6 +507,61 @@ export class Track {
       polygonOffsetUnits: -2,
     });
     return new THREE.Mesh(g, material);
+  }
+
+  /**
+   * Markings on the jump: a white line across the road along the edge of each lip, and wide chevrons pointing at the
+   * jump, spaced out along the up ramp from its foot.
+   */
+  private buildJumpMarks(): THREE.Mesh {
+    const n = this.sampleCount;
+    const pos: number[] = [];
+    const idx: number[] = [];
+    /** A point on the road surface: `along` metres past sample `from` (negative = before it), `lateral` metres to the side. */
+    const at = (from: number, along: number, lateral: number): number[] => {
+      const f = from + along / this.spacing;
+      const i = Math.floor(f);
+      const t = f - i;
+      const a = this.samples[((i % n) + n) % n];
+      const b = this.samples[(((i + 1) % n) + n) % n];
+      const x = a.p.x + (b.p.x - a.p.x) * t;
+      const y = a.p.y + (b.p.y - a.p.y) * t;
+      const z = a.p.z + (b.p.z - a.p.z) * t;
+      const tx = a.tangent.x + (b.tangent.x - a.tangent.x) * t;
+      const tz = a.tangent.z + (b.tangent.z - a.tangent.z) * t;
+      const len = Math.hypot(tx, tz) || 1;
+      return [x - (tz / len) * lateral, y + JUMP_MARK_LIFT, z + (tx / len) * lateral];
+    };
+    const quad = (a: number[], b: number[], c: number[], d: number[]) => {
+      const base = pos.length / 3;
+      pos.push(...a, ...b, ...c, ...d);
+      idx.push(base, base + 1, base + 2, base + 2, base + 1, base + 3);
+    };
+    if (this.hasJump) {
+      const half = this.halfWidth;
+      // Edge lines along the lip of the up ramp and of the landing.
+      quad(at(this.gapFrom, -JUMP_EDGE_LINE, -half), at(this.gapFrom, -JUMP_EDGE_LINE, half), at(this.gapFrom, 0, -half), at(this.gapFrom, 0, half));
+      quad(at(this.gapTo, 0, -half), at(this.gapTo, 0, half), at(this.gapTo, JUMP_EDGE_LINE, -half), at(this.gapTo, JUMP_EDGE_LINE, half));
+      // Chevrons: each is a V whose tip points along the direction of travel.
+      const foot = this.gapFrom - Math.ceil(JUMP.length / this.spacing);
+      const footAlong = -(this.gapFrom - foot) * this.spacing; // ramp foot, in metres from the lip
+      for (let k = 0; k < JUMP_ARROWS; k++) {
+        const start = footAlong + JUMP_ARROW_FIRST + k * JUMP_ARROW_SPACING; // back of the chevron, metres from the lip
+        const tip = start + JUMP_ARROW_LENGTH;
+        const w = JUMP_ARROW_WIDTH;
+        const t = JUMP_ARROW_THICKNESS;
+        quad(at(this.gapFrom, start, -w), at(this.gapFrom, tip, 0), at(this.gapFrom, start - t, -w), at(this.gapFrom, tip - t, 0));
+        quad(at(this.gapFrom, tip, 0), at(this.gapFrom, start, w), at(this.gapFrom, tip - t, 0), at(this.gapFrom, start - t, w));
+      }
+    }
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    g.setIndex(idx);
+    g.computeVertexNormals();
+    return new THREE.Mesh(
+      g,
+      new THREE.MeshLambertMaterial({ color: 0xf4f4f4, side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 }),
+    );
   }
 
   /** Chequered start/finish line across the road at sample 0, where laps are counted. */
