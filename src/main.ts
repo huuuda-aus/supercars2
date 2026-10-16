@@ -16,6 +16,7 @@ import { allTracks, THEMES, trackForRace, TRACK_LIST, trackLength, type Theme, t
 import { formatTime, Race } from './race';
 import { applyGroundUVs, createTrees, makeGroundTexture } from './scenery';
 import { Skidmarks } from './skidmarks';
+import { Sky } from './sky';
 import { Track } from './track';
 import { aiStats, MAX_UPGRADE_LEVEL, RIVAL_CAR_TIER, starterStats, statsFor, upgradePrice, type UpgradeSlot } from './upgrades';
 import { Weapons } from './weapons';
@@ -55,6 +56,9 @@ function shade(obj: THREE.Object3D, cast: boolean, receive: boolean): void {
   });
 }
 
+const sky = new Sky();
+scene.add(sky.group);
+
 const groundTextures = new Map<Theme, THREE.CanvasTexture>();
 function groundTexture(theme: Theme): THREE.CanvasTexture {
   let tex = groundTextures.get(theme);
@@ -65,7 +69,12 @@ function groundTexture(theme: Theme): THREE.CanvasTexture {
   return tex;
 }
 
-const ground = new THREE.Mesh(new THREE.PlaneGeometry(1000, 1000), new THREE.MeshLambertMaterial({ map: groundTexture('grass') }));
+// The ground reaches well past where the fog has swallowed it, so there is no visible edge. Its texture coordinates
+// are scaled to keep the tiles the size they were on the old 1000 m plane (and in step with the terrain beside the road).
+const groundGeometry = new THREE.PlaneGeometry(3000, 3000);
+const groundUv = groundGeometry.getAttribute('uv');
+for (let i = 0; i < groundUv.count; i++) groundUv.setXY(i, groundUv.getX(i) * 3, groundUv.getY(i) * 3);
+const ground = new THREE.Mesh(groundGeometry, new THREE.MeshLambertMaterial({ map: groundTexture('grass') }));
 ground.rotation.x = -Math.PI / 2;
 ground.position.y = -0.05;
 shade(ground, false, true);
@@ -134,6 +143,8 @@ function loadTrack(def: TrackDef): void {
   const style = THEMES[def.theme];
   const tex = groundTexture(def.theme);
   scene.background = new THREE.Color(style.background);
+  sky.setTheme(def.theme);
+  scene.fog = new THREE.Fog(sky.haze, 320, 900); // the far ground fades into the haze at the horizon
   (ground.material as THREE.MeshLambertMaterial).map = tex;
   (ground.material as THREE.MeshLambertMaterial).needsUpdate = true;
   (track.terrain.material as THREE.MeshLambertMaterial).map = tex;
@@ -204,7 +215,7 @@ function resetRace(): void {
   }
 }
 const ortho = new THREE.OrthographicCamera(-1, 1, 1, -1, 1, 300);
-const chase = new THREE.PerspectiveCamera(60, 1, 0.1, 500);
+const chase = new THREE.PerspectiveCamera(60, 1, 0.3, 2600);
 let useOrtho = true;
 
 function resize(): void {
@@ -509,6 +520,7 @@ function renderMenu(now: number): void {
   sun.position.copy(sun.target.position).add(SUN_OFFSET);
   chase.position.set(centre.x + Math.cos(a) * extent * 1.1, extent * 0.6, centre.y + Math.sin(a) * extent * 1.1);
   chase.lookAt(centre.x, 0, centre.y);
+  sky.update(1 / 60, chase.position);
   renderer.render(scene, chase);
 }
 
@@ -629,6 +641,7 @@ function frame(now: number): void {
     ...weapons.mines.map((m) => ({ x: m.x, z: m.z, color: '#ff3020', size: 2.6 })),
   ]);
   updateCamera(frameTime);
+  sky.update(frameTime, (useOrtho ? ortho : chase).position);
   renderer.render(scene, useOrtho ? ortho : chase);
   const place = race.standings(allCars, track).indexOf(car) + 1;
   const lap = Math.max(1, Math.min(car.lap, race.totalLaps));
