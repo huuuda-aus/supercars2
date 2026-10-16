@@ -170,7 +170,7 @@ export class Screens {
     this.open(page, o.onBack);
   }
 
-  showSettings(o: { levels: string[]; difficulty: number; onDifficulty: (index: number) => void; weapons: boolean; onWeapons: (on: boolean) => void; onBack: Handler }): void {
+  showSettings(o: { levels: string[]; difficulty: number; onDifficulty: (index: number) => void; weapons: boolean; onWeapons: (on: boolean) => void; onEditor: Handler; onBack: Handler }): void {
     const page = el('div', 'screen centre');
     page.append(el('h2', '', 'Settings'), el('p', 'note', 'AI difficulty: how well the rival drivers drive and fight. Their cars are the same at every level.'));
     const menu = el('div', 'menu');
@@ -190,7 +190,7 @@ export class Screens {
       toggle.querySelector('.label')!.textContent = `Weapons: ${weaponsOn ? 'ON' : 'OFF'}`;
       toggle.classList.toggle('selected', weaponsOn);
     }, { selected: weaponsOn });
-    menu.append(toggle, this.button('Back', o.onBack, { sound: 'back' }));
+    menu.append(toggle, this.button('Track editor', o.onEditor, { hint: 'draw your own circuits' }), this.button('Back', o.onBack, { sound: 'back' }));
     page.append(menu, weaponsNote);
     this.open(page, o.onBack);
   }

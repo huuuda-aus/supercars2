@@ -78,13 +78,14 @@ const LOCK_BASE = 0.12;
 const LOCK_SPEED_TERM = 120;
 
 /** Handbrake: locks the rear wheels. The rear axle loses most of its grip (so the tail swings out) and slows the car. */
-const HANDBRAKE_GRIP_LOSS = 0.5;
-const HANDBRAKE_DECEL = 3; // m/s^2 of rear-wheel braking at full pull
+const HANDBRAKE_GRIP_LOSS = 0.25;
+const HANDBRAKE_DECEL = 1; // m/s^2 of rear-wheel braking at full pull (it is for sliding the tail, not for stopping)
+const HANDBRAKE_DRIVE_LOSS = 0.3; // share of the rear axle's drive force lost at full pull: with the pedal down the car keeps its power
 const HANDBRAKE_RAMP = 10; // 1/s, how fast the pull builds and releases
 /** A slide counts as a drift past this body slip angle (rad) and speed (m/s). */
 /** Past this slip angle the car is turned too far sideways to hold a drift: extra yaw damping (1/s per rad over) pulls it back. */
-const DRIFT_STABILIZE_FROM = 0.5;
-const DRIFT_STABILIZE = 10;
+const DRIFT_STABILIZE_FROM = 0.4;
+const DRIFT_STABILIZE = 8;
 const DRIFT_ANGLE = 0.3;
 const DRIFT_MIN_SPEED = 9;
 const DRIFT_GRACE = 0.6; // seconds a drift may be interrupted before the combo is banked
@@ -130,6 +131,7 @@ const HS_LOSS = 0.22; // rear grip lost at full effect (stock tyres)
 const SLIDE_SCRUB_FROM = 0.25;
 const SLIDE_SCRUB_RANGE = 0.45;
 const SLIDE_SCRUB = 3;
+const SLIDE_SCRUB_POWER_RELIEF = 0.7; // fraction of the scrub removed at full throttle
 
 /** Hands off the wheel in a slide: the car straightens itself with this yaw acceleration (rad/s^2 per rad of body slip). */
 const DRIFT_CATCH = 9;
@@ -207,6 +209,7 @@ export class Car {
   private throttleState = 0;
   private wheelSpeed = 0; // m/s at the tyre contact patch; above the road speed means spinning
   private spinAmount = 0;
+  private revsBeforeHandbrake = 0;
   rpm = 0; // engine speed as a fraction of the redline (a little over 1 on the limiter)
   gear = 0; // 1..5, 0 in neutral, -1 in reverse (for the dials)
   private brakeState = 0;
@@ -635,6 +638,13 @@ export class Car {
     let target = (g === 0 ? REVS_IDLE : REVS_AFTER_SHIFT) + (1 - (g === 0 ? REVS_IDLE : REVS_AFTER_SHIFT)) * f;
     // Standing or crawling with the pedal down, the engine revs freely against the slipping clutch.
     if (w < 2.5) target = Math.max(target, REVS_IDLE + 0.65 * this.throttleState);
+    // Pull the handbrake with the pedal down and the rear wheels lock, so the engine is unloaded: the revs hold, even
+    // climb a little, however much speed the slide costs.
+    if (this.handbrakeState > 0.05 && this.throttleState > 0.4) {
+      target = Math.max(target, Math.min(1.05, this.revsBeforeHandbrake + 0.1 * this.handbrakeState));
+    } else if (this.handbrakeState <= 0.05) {
+      this.revsBeforeHandbrake = this.rpm;
+    }
     this.rpm += (target - this.rpm) * Math.min(1, (target > this.rpm ? 12 : 6) * dt);
     this.gear = reversing ? -1 : w < 0.5 && this.throttleState < 0.05 ? 0 : g + 1;
   }
@@ -700,7 +710,7 @@ export class Car {
     const hbGrip = 1 - HANDBRAKE_GRIP_LOSS * this.handbrakeState;
     // Locked rear wheels deliver no drive; they brake instead.
     const hbBrake = Math.min(HANDBRAKE_DECEL * this.handbrakeState, Math.abs(u) / dt) * Math.sign(u);
-    const fxRear = (ax - axFront) * (1 - this.handbrakeState) - hbBrake;
+    const fxRear = (ax - axFront) * (1 - HANDBRAKE_DRIVE_LOSS * this.handbrakeState) - hbBrake;
 
     const transfer = Math.max(-1.5, Math.min(1.5, ax / ACCEL)) * (ax > 0 ? LOAD_TRANSFER : LOAD_TRANSFER_BRAKING);
     // Spinning wheels have little left for cornering: steer while burning rubber and the tail swings out.
@@ -716,15 +726,19 @@ export class Car {
     const circle = (fx: number, g: number) => Math.max(CIRCLE_FLOOR, Math.sqrt(Math.max(0, 1 - (fx / g) ** 2)));
     const fFront = tyreForce(u, v + WHEEL_Z * w, delta, gripFront * circle(axFront, gripFront));
     const fRear = tyreForce(u, v - WHEEL_Z * w, 0, gripRear * circle(fxRear, gripRear));
-    const fxFront = axFront * Math.cos(delta) - fFront * Math.sin(delta);
-    const fyFront = axFront * Math.sin(delta) + fFront * Math.cos(delta);
+    // The brake and drive force act along the car, not along the steered wheel: with the wheel turned, braking hard would
+    // otherwise push the nose to the outside of the bend and spin the car the other way.
+    const fxFront = axFront - fFront * Math.sin(delta);
+    const fyFront = fFront * Math.cos(delta);
 
     this.vf = u + (fxRear + fxFront + v * w) * dt;
     this.vl = v + (fyFront + fRear - u * w) * dt;
     this.omega = w + ((WHEEL_Z * fyFront - WHEEL_Z * fRear) / INERTIA) * dt;
     this.omega *= Math.exp(-YAW_DAMPING * dt);
     const slip = Math.abs(Math.atan2(this.vl, Math.max(Math.abs(this.vf), 1)));
-    this.vl *= Math.exp(-SLIDE_SCRUB * Math.min(1, Math.max(0, (slip - SLIDE_SCRUB_FROM) / SLIDE_SCRUB_RANGE)) * dt);
+    // Power keeps a slide going (and keeps the speed up), so the scrub fades with the throttle.
+    const scrub = SLIDE_SCRUB * (1 - SLIDE_SCRUB_POWER_RELIEF * this.throttleState);
+    this.vl *= Math.exp(-scrub * Math.min(1, Math.max(0, (slip - SLIDE_SCRUB_FROM) / SLIDE_SCRUB_RANGE)) * dt);
     if (slip > DRIFT_STABILIZE_FROM) this.omega *= Math.exp(-DRIFT_STABILIZE * (slip - DRIFT_STABILIZE_FROM) * dt);
     // Let go of the steering in a slide and the car straightens itself (a tap of the handbrake is then a flick, not a
     // spin). Hold the wheel in or against the slide and you are in charge: no help.

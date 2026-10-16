@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Super Cars: Track Editor</title>
+  <style>
+    html, body { margin: 0; height: 100%; background: #101411; color: #e6e9e2; font: 14px/1.4 monospace; overflow: hidden; }
+    #app { display: flex; height: 100%; }
+    #side { width: 330px; flex: none; overflow-y: auto; padding: 12px 14px 24px; box-sizing: border-box; background: #171c18; border-right: 1px solid #2c352e; }
+    #stage { position: relative; flex: 1; min-width: 0; }
+    canvas { display: block; width: 100%; height: 100%; cursor: crosshair; touch-action: none; }
+    h1 { margin: 0 0 2px; font-size: 20px; letter-spacing: 0.05em; }
+    h2 { margin: 16px 0 6px; font-size: 12px; text-transform: uppercase; letter-spacing: 0.12em; color: #8d978b; }
+    a { color: #f0a030; }
+    label { display: block; margin: 6px 0 2px; color: #b9bfb2; font-size: 12px; }
+    input[type=text], input[type=number], select { width: 100%; box-sizing: border-box; padding: 6px 8px; font: inherit; color: #fff; background: #0e120f; border: 1px solid #38423a; border-radius: 5px; }
+    input[type=range] { width: 100%; }
+    .row { display: flex; gap: 6px; flex-wrap: wrap; }
+    .row > * { flex: 1; }
+    button { font: inherit; color: #fff; padding: 6px 8px; background: #26302a; border: 1px solid #3c483f; border-radius: 5px; cursor: pointer; }
+    button:hover:not(:disabled) { border-color: #f0a030; }
+    button:disabled { opacity: 0.4; cursor: default; }
+    button.on { background: #6b4210; border-color: #f0a030; }
+    button.primary { background: #a85414; border-color: #ffbe5c; }
+    .tools button { flex: 1 1 45%; }
+    #info { color: #b9bfb2; font-size: 12px; margin-top: 8px; }
+    .crossing { padding: 8px; margin: 6px 0; background: #0e120f; border: 1px solid #2f3a31; border-radius: 6px; }
+    .crossing.active { border-color: #f0a030; }
+    .crossing .head { display: flex; justify-content: space-between; margin-bottom: 4px; }
+    .crossing .note { color: #ffb36b; font-size: 12px; margin-top: 4px; }
+    .warn { color: #ffb36b; margin: 4px 0; font-size: 12px; }
+    .ok { color: #7be07b; font-size: 12px; }
+    .hint { color: #7d887b; font-size: 12px; }
+    #toast { position: absolute; right: 14px; top: 12px; padding: 8px 12px; background: rgba(10, 14, 12, 0.9); border: 1px solid #f0a030; border-radius: 6px; opacity: 0; transition: opacity 0.2s; pointer-events: none; }
+    #toast.show { opacity: 1; }
+    #legend { position: absolute; left: 12px; bottom: 10px; padding: 6px 10px; background: rgba(10, 14, 12, 0.75); border-radius: 6px; font-size: 12px; color: #b9bfb2; pointer-events: none; }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <div id="side">
+      <h1>Track editor</h1>
+      <a href="index.html">&larr; back to the game</a>
+
+      <h2>Track</h2>
+      <label for="mine">My tracks</label>
+      <div class="row"><select id="mine"></select></div>
+      <div class="row" style="margin-top:6px"><button id="load">Load</button><button id="new">New</button><button id="delete">Delete</button></div>
+      <label for="name">Name</label>
+      <input id="name" type="text" maxlength="28" />
+      <div class="row">
+        <div><label for="theme">Theme</label><select id="theme"><option value="grass">Grass</option><option value="snow">Snow</option><option value="mountain">Mountain</option></select></div>
+        <div><label for="laps">Laps</label><input id="laps" type="number" min="1" max="10" /></div>
+      </div>
+      <label for="hills">Hills: <span id="hillsValue"></span></label>
+      <input id="hills" type="range" min="0" max="2.5" step="0.1" />
+      <div class="row" style="margin-top:10px"><button id="save" class="primary">Save</button><button id="drive">Save &amp; test drive</button></div>
+      <div class="row" style="margin-top:6px"><button id="export">Export JSON</button><button id="import">Import JSON</button></div>
+      <input id="file" type="file" accept="application/json,.json" hidden />
+
+      <h2>Tools</h2>
+      <div class="row tools">
+        <button id="tool-move" title="M">Move points</button>
+        <button id="tool-add" title="A">Add point</button>
+        <button id="tool-delete" title="D">Delete point</button>
+        <button id="tool-start" title="S">Set start line</button>
+      </div>
+      <div class="hint" style="margin-top:6px">Drag to move. In Add, click on the road to insert a point. Right-drag or Space+drag pans, wheel zooms. Arrow keys nudge the selected point. Ctrl+Z / Ctrl+Y undo and redo.</div>
+
+      <h2>Shape</h2>
+      <div class="row"><button id="undo">Undo</button><button id="redo">Redo</button></div>
+      <div class="row" style="margin-top:6px"><button id="smooth">Smooth</button><button id="reverse">Reverse</button><button id="centre">Centre</button></div>
+      <div class="row" style="margin-top:6px"><button id="mirrorx">Mirror &harr;</button><button id="mirrorz">Mirror &updownarrow;</button><button id="rotate">Rotate 90&deg;</button></div>
+      <div class="row" style="margin-top:6px"><button id="shrink">Scale &minus;10%</button><button id="grow">Scale +10%</button></div>
+      <label for="preset">Start from</label>
+      <div class="row"><select id="preset"></select><button id="usePreset" style="flex:none">Use</button></div>
+
+      <h2>Crossings</h2>
+      <div id="crossings"></div>
+
+      <h2>Checks</h2>
+      <div id="checks"></div>
+      <div id="info"></div>
+    </div>
+    <div id="stage">
+      <canvas id="canvas"></canvas>
+      <div id="legend">
+        <span style="color:#7be07b">&#9679;</span> start/finish &nbsp;
+        <span style="color:#ffd23a">&#9679;</span> level &nbsp;
+        <span style="color:#ff6a4a">&#9679;</span> ramp (jump) &nbsp;
+        <span style="color:#5fb0ff">&#9679;</span> bridge &nbsp;
+        <span style="color:#ff4a4a">&#9679;</span> problem
+      </div>
+      <div id="toast"></div>
+    </div>
+  </div>
+  <script type="module" src="/src/editor.ts"></script>
+</body>
+</html>

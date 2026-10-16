@@ -139,7 +139,9 @@ export class Pickups {
     const n = track.sampleCount;
     const blocked = (i: number) => {
       if (track.hasJump && ahead(track.gapFrom - 90, i, n) <= track.gapTo + 30 - (track.gapFrom - 90)) return true; // the jump and its run-up
-      if (track.hasJump && ahead(track.crossingIndex - 40, i, n) <= 80) return true; // the crossing under the jump
+      for (const c of track.crossings) {
+        if (ahead(c.a - 45, i, n) <= 90 || ahead(c.b - 45, i, n) <= 90) return true; // any crossing, on either strand
+      }
       if (ahead(n - 90, i, n) <= 105) return true; // the starting grid
       return false;
     };

@@ -12,7 +12,7 @@ import { PICKUP_COLOURS, Pickups } from './pickups';
 import { buildCarModel } from './carmodel';
 import { cleanName, loadGame, loadSettings, newGame, prizeFor, saveGame, saveSettings, type SaveGame } from './save';
 import { Screens } from './screens';
-import { THEMES, trackForRace, TRACK_LIST, trackLength, type Theme, type TrackDef } from './tracks';
+import { allTracks, THEMES, trackForRace, TRACK_LIST, trackLength, type Theme, type TrackDef } from './tracks';
 import { formatTime, Race } from './race';
 import { applyGroundUVs, createTrees, makeGroundTexture } from './scenery';
 import { Skidmarks } from './skidmarks';
@@ -77,7 +77,10 @@ let skidmarks!: Skidmarks;
 let pickups!: Pickups;
 let minimap!: Minimap;
 let circuitObjects: THREE.Object3D[] = [];
-let loadedTrackId = '';
+let loadedTrackKey = '';
+
+/** Identifies a circuit including its contents, so an edited custom track is rebuilt even though its id is the same. */
+const trackKey = (def: TrackDef) => `${def.id}|${JSON.stringify([def.points, def.crossings, def.theme, def.laps, def.hills])}`;
 let raceUiVisible = false;
 
 let playerStats = starterStats();
@@ -106,7 +109,7 @@ const race = new Race();
 
 /** Build the world for a circuit: road, walls, terrain, scenery, skid marks, power-up spots and the minimap. */
 function loadTrack(def: TrackDef): void {
-  if (loadedTrackId === def.id) return;
+  if (loadedTrackKey === trackKey(def)) return;
   for (const o of circuitObjects) {
     scene.remove(o);
     o.traverse((c) => {
@@ -116,13 +119,14 @@ function loadTrack(def: TrackDef): void {
   minimap?.destroy();
 
   track = new Track(def);
-  circuitObjects = [track.mesh, track.centreLine, track.kerbs, track.finishLine, track.walls, track.terrain, track.pit];
+  circuitObjects = [track.mesh, track.centreLine, track.kerbs, track.finishLine, track.walls, track.terrain, track.pit, track.deck];
   scene.add(...circuitObjects);
   shade(track.mesh, true, true);
   shade(track.centreLine, false, true);
   shade(track.kerbs, false, true);
   shade(track.finishLine, false, true);
   shade(track.pit, false, true);
+  shade(track.deck, true, true);
   shade(track.walls, true, true);
   shade(track.terrain, true, true);
   applyGroundUVs(track.terrain);
@@ -157,7 +161,7 @@ function loadTrack(def: TrackDef): void {
   minimap.setVisible(raceUiVisible);
   weapons.setTrack(track);
   race.totalLaps = def.laps;
-  loadedTrackId = def.id;
+  loadedTrackKey = trackKey(def);
 }
 let levelIndex = loadSettings().difficulty;
 let weaponsEnabled = loadSettings().weapons;
@@ -219,7 +223,9 @@ function resize(): void {
 addEventListener('resize', resize);
 resize();
 
-function updateCamera(): void {
+let chaseHeight = 5; // how high the third-person camera sits above the car (lowered under bridges)
+
+function updateCamera(dt: number): void {
   // The shadow map only needs to cover the area around the player.
   sun.target.position.set(car.x, car.y, car.z);
   sun.position.copy(sun.target.position).add(SUN_OFFSET);
@@ -230,9 +236,17 @@ function updateCamera(): void {
     ortho.lookAt(car.x, 0, car.z);
   } else {
     const back = 10;
+    // Under a bridge, duck below its deck so the car stays in view: look along the whole line from the car back to
+    // the camera for anything overhead, and sit just beneath the lowest of it.
+    let ceiling = Infinity;
+    for (const f of [0, 0.35, 0.7, 1]) {
+      ceiling = Math.min(ceiling, track.ceilingAt(car.x - Math.sin(car.heading) * back * f, car.z - Math.cos(car.heading) * back * f, car.y + 0.5));
+    }
+    const wanted = Math.max(1.8, Math.min(5, ceiling - car.y - 0.6));
+    chaseHeight += (wanted - chaseHeight) * Math.min(1, dt * 6);
     chase.position.set(
       car.x - Math.sin(car.heading) * back,
-      car.y + 5,
+      car.y + chaseHeight,
       car.z - Math.cos(car.heading) * back,
     );
     chase.lookAt(car.x, car.y + 1, car.z);
@@ -292,6 +306,7 @@ type Mode = 'menu' | 'race';
 let mode: Mode = 'menu';
 let careerGame: SaveGame | null = null; // the career being raced, or null in training
 let trainingTrack = 0;
+let trainingList: TrackDef[] = TRACK_LIST; // the circuits on offer in training, built-in then the editor's
 
 function setRaceUi(on: boolean): void {
   raceUiVisible = on;
@@ -327,7 +342,7 @@ function startRace(): void {
   levelIndex = loadSettings().difficulty;
   weaponsEnabled = loadSettings().weapons;
   playerGridSlot = gridSlotFor(careerGame);
-  loadTrack(careerGame ? trackForRace(careerGame.racesDone) : TRACK_LIST[trainingTrack]);
+  loadTrack(careerGame ? trackForRace(careerGame.racesDone) : trainingList[trainingTrack]);
   if (careerGame) {
     playerStats = statsFor(careerGame.levels);
     playerName = careerGame.name;
@@ -416,9 +431,10 @@ function showCarSelect(name: string): void {
 
 function showTrainingTracks(): void {
   careerGame = null;
+  trainingList = allTracks();
   enterMenu(() =>
     screens.showTracks({
-      tracks: TRACK_LIST.map((t) => ({ name: t.name, description: `${t.description}  ·  ${t.laps} laps, ${Math.round(trackLength(t))} m` })),
+      tracks: trainingList.map((t) => ({ name: t.name, description: `${t.description}  ·  ${t.laps} laps, ${Math.round(trackLength(t))} m` })),
       onPick: (i) => {
         trainingTrack = i;
         startRace();
@@ -439,6 +455,9 @@ function showSettings(): void {
       },
       weapons: loadSettings().weapons,
       onWeapons: (on) => saveSettings({ ...loadSettings(), weapons: on }),
+      onEditor: () => {
+        location.href = 'editor.html';
+      },
       onBack: showTitle,
     }),
   );
@@ -609,7 +628,7 @@ function frame(now: number): void {
     ...weapons.oils.map((o) => ({ x: o.x, z: o.z, color: '#9a7bd0', size: 3 })),
     ...weapons.mines.map((m) => ({ x: m.x, z: m.z, color: '#ff3020', size: 2.6 })),
   ]);
-  updateCamera();
+  updateCamera(frameTime);
   renderer.render(scene, useOrtho ? ortho : chase);
   const place = race.standings(allCars, track).indexOf(car) + 1;
   const lap = Math.max(1, Math.min(car.lap, race.totalLaps));
@@ -631,4 +650,17 @@ function frame(now: number): void {
 }
 loadTrack(TRACK_LIST[0]);
 showTitle();
+// Coming from the track editor's "Test drive": go straight into a training race on that circuit.
+const playId = new URLSearchParams(location.search).get('play');
+if (playId) {
+  const list = allTracks();
+  const index = list.findIndex((t) => t.id === playId);
+  history.replaceState(null, '', location.pathname);
+  if (index >= 0) {
+    careerGame = null;
+    trainingList = list;
+    trainingTrack = index;
+    startRace();
+  }
+}
 requestAnimationFrame(frame);

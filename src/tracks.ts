@@ -50,9 +50,152 @@ export interface TrackDef {
   points: [number, number][];
   /** Rolling hills: 1 is gentle, more is a hillier road. */
   hills: number;
-  /** The jump over the crossing (figure-eight only). */
+  /**
+   * The built-in figure-eight: the jump over its crossing. (A drawn circuit sets its crossings in `crossings`.)
+   */
   jump: boolean;
+  /**
+   * What each place where the circuit crosses itself is. Crossings are found from the shape; these settings are matched
+   * to them by position, and any crossing without one is a plain level crossing.
+   */
+  crossings?: CrossingSetting[];
 }
+
+/** What kind of crossing: `level` a flat junction, `ramp` a jump over the other road, `bridge` a flyover (an underpass for the other road). */
+export type CrossingType = 'level' | 'ramp' | 'bridge';
+
+export interface CrossingSetting {
+  x: number;
+  z: number;
+  type: CrossingType;
+  /** Which of the two strands goes over (ramp and bridge): the one that comes first from the start line, or the second. */
+  over: 'first' | 'second';
+  /**
+   * The direction of travel (radians, atan2(z, x)) of the strand that goes over. When present it decides which strand is
+   * over, so moving the start line or reshaping the circuit keeps the same road on top.
+   */
+  overHeading?: number;
+}
+
+/** A place where the circuit meets itself: sample indices of the two strands (a < b) and where. */
+export interface Crossing {
+  a: number;
+  b: number;
+  x: number;
+  z: number;
+  /** The angle between the strands (radians, 0..pi/2): small means they cross at a shallow angle. */
+  angle: number;
+  /** Direction of travel of strand a and of strand b there (radians, atan2(z, x)). */
+  headingA: number;
+  headingB: number;
+}
+
+/** A crossing with its type settled. `note` says why a requested type was not possible. */
+export interface SettledCrossing extends Crossing {
+  type: CrossingType;
+  over: 'first' | 'second';
+  note?: string;
+}
+
+/** Spacing the circuit is sampled at; every part of the game that works in samples assumes about this. */
+export const SAMPLE_SPACING = 1.07;
+
+/** How the circuit is sampled: the same way for the game's track and the editor, so their sample indices agree. */
+export function sampleLoop(points: [number, number][]): { positions: THREE.Vector3[]; tangents: THREE.Vector3[]; length: number } {
+  const curve = new THREE.CatmullRomCurve3(
+    points.map(([x, z]) => new THREE.Vector3(x, 0, z)),
+    true,
+    'centripetal',
+  );
+  const length = curve.getLength();
+  const n = Math.max(40, Math.round(length / SAMPLE_SPACING));
+  const positions: THREE.Vector3[] = [];
+  const tangents: THREE.Vector3[] = [];
+  for (let i = 0; i < n; i++) {
+    positions.push(curve.getPointAt(i / n));
+    const t = curve.getTangentAt(i / n);
+    t.y = 0;
+    tangents.push(t.normalize());
+  }
+  return { positions, tangents, length };
+}
+
+/** Samples of road a ramp needs on each side of its crossing before the start line (the ramps are about 20 m long). */
+export const RAMP_MARGIN = 35;
+
+const angleBetween = (a: number, b: number) => Math.abs(Math.atan2(Math.sin(a - b), Math.cos(a - b)));
+
+/**
+ * Match the drawn crossing settings to the crossings found in the shape (the nearest setting within 40 m, else a plain
+ * level crossing) and settle them. Only one ramp is possible and not within RAMP_MARGIN samples of the start line;
+ * anything else asked for falls back to a level crossing with a note.
+ */
+export function settleCrossings(found: Crossing[], settings: CrossingSetting[], sampleCount: number): SettledCrossing[] {
+  let rampTaken = false;
+  return found.map((c) => {
+    let best: CrossingSetting | undefined;
+    let bestD = 40;
+    for (const s of settings) {
+      const d = Math.hypot(s.x - c.x, s.z - c.z);
+      if (d < bestD) {
+        bestD = d;
+        best = s;
+      }
+    }
+    let over: 'first' | 'second' = best?.over ?? 'first';
+    if (best?.overHeading !== undefined) over = angleBetween(c.headingA, best.overHeading) <= angleBetween(c.headingB, best.overHeading) ? 'first' : 'second';
+    let type: CrossingType = best?.type ?? 'level';
+    let note: string | undefined;
+    const overIndex = over === 'first' ? c.a : c.b;
+    if (type === 'ramp') {
+      if (rampTaken) {
+        type = 'level';
+        note = 'only one ramp per circuit';
+      } else if (overIndex < RAMP_MARGIN || overIndex > sampleCount - RAMP_MARGIN) {
+        type = 'level';
+        note = 'too close to the start line for a ramp';
+      } else {
+        rampTaken = true;
+      }
+    }
+    return { ...c, type, over, note };
+  });
+}
+
+/** Find every place where non-neighbouring parts of the loop cross each other. */
+export function detectCrossings(positions: { x: number; z: number }[], tangents: { x: number; z: number }[]): Crossing[] {
+  const n = positions.length;
+  const minGap = Math.round(90 / SAMPLE_SPACING); // parts closer than this along the road are the same stretch, not a crossing
+  const found: Crossing[] = [];
+  for (let i = 0; i < n; i++) {
+    const p = positions[i];
+    const q = positions[(i + 1) % n];
+    for (let j = i + minGap; j < n; j++) {
+      if (n - (j - i) < minGap) break;
+      const r = positions[j];
+      const s = positions[(j + 1) % n];
+      const d1x = q.x - p.x, d1z = q.z - p.z, d2x = s.x - r.x, d2z = s.z - r.z;
+      const den = d1x * d2z - d1z * d2x;
+      if (Math.abs(den) < 1e-9) continue;
+      const u = ((r.x - p.x) * d2z - (r.z - p.z) * d2x) / den;
+      const v = ((r.x - p.x) * d1z - (r.z - p.z) * d1x) / den;
+      if (u < 0 || u > 1 || v < 0 || v > 1) continue;
+      if (found.some((c) => Math.abs(c.a - i) < 4 && Math.abs(c.b - j) < 4)) continue;
+      const cross = Math.abs(tangents[i].x * tangents[j].z - tangents[i].z * tangents[j].x);
+      found.push({
+        a: i,
+        b: j,
+        x: p.x + d1x * u,
+        z: p.z + d1z * u,
+        angle: Math.asin(Math.min(1, cross)),
+        headingA: Math.atan2(tangents[i].z, tangents[i].x),
+        headingB: Math.atan2(tangents[j].z, tangents[j].x),
+      });
+    }
+  }
+  return found;
+}
+
 
 /** The classic figure-eight, a Gerono lemniscate whose crossing is where the jump goes. */
 function figureEight(): [number, number][] {
@@ -266,4 +409,67 @@ export function trackLength(def: TrackDef): number {
     'centripetal',
   );
   return curve.getLength();
+}
+
+// --- Circuits drawn in the track editor ------------------------------------------------------------------------
+
+const CUSTOM_KEY = 'supercars.customTracks.v1';
+const THEME_NAMES: Theme[] = ['grass', 'snow', 'mountain'];
+
+/** Check and tidy a circuit that came from storage or an imported file; null if it is not usable. */
+export function sanitizeTrack(raw: unknown): TrackDef | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const r = raw as Record<string, unknown>;
+  if (!Array.isArray(r.points) || r.points.length < 4 || r.points.length > 400) return null;
+  const points: [number, number][] = [];
+  for (const p of r.points) {
+    if (!Array.isArray(p) || typeof p[0] !== 'number' || typeof p[1] !== 'number' || !Number.isFinite(p[0]) || !Number.isFinite(p[1])) return null;
+    if (Math.abs(p[0]) > 2000 || Math.abs(p[1]) > 2000) return null;
+    points.push([p[0], p[1]]);
+  }
+  const crossings: CrossingSetting[] = [];
+  if (Array.isArray(r.crossings)) {
+    for (const c of r.crossings as Record<string, unknown>[]) {
+      if (!c || typeof c.x !== 'number' || typeof c.z !== 'number') continue;
+      const type: CrossingType = c.type === 'ramp' || c.type === 'bridge' ? c.type : 'level';
+      crossings.push({
+        x: c.x,
+        z: c.z,
+        type,
+        over: c.over === 'second' ? 'second' : 'first',
+        ...(typeof c.overHeading === 'number' && Number.isFinite(c.overHeading) ? { overHeading: c.overHeading } : {}),
+      });
+    }
+  }
+  const name = String(r.name ?? 'Custom track').replace(/\s+/g, ' ').trim().slice(0, 28) || 'Custom track';
+  const id = typeof r.id === 'string' && /^[\w-]{1,40}$/.test(r.id) ? r.id : `custom-${Date.now().toString(36)}`;
+  const theme = THEME_NAMES.includes(r.theme as Theme) ? (r.theme as Theme) : 'grass';
+  const laps = typeof r.laps === 'number' && Number.isFinite(r.laps) ? Math.max(1, Math.min(10, Math.round(r.laps))) : 3;
+  const hills = typeof r.hills === 'number' && Number.isFinite(r.hills) ? Math.max(0, Math.min(2.5, r.hills)) : 1;
+  return { id, name, description: 'A circuit from the track editor.', theme, laps, hills, jump: false, points, crossings };
+}
+
+/** The circuits saved from the editor. */
+export function loadCustomTracks(): TrackDef[] {
+  try {
+    const raw = JSON.parse(localStorage.getItem(CUSTOM_KEY) ?? '[]');
+    if (!Array.isArray(raw)) return [];
+    return raw.map(sanitizeTrack).filter((t): t is TrackDef => t !== null);
+  } catch {
+    return [];
+  }
+}
+
+export function saveCustomTracks(tracks: TrackDef[]): boolean {
+  try {
+    localStorage.setItem(CUSTOM_KEY, JSON.stringify(tracks));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Built-in circuits followed by the ones drawn in the editor (training can race any of them; the career uses the built-ins). */
+export function allTracks(): TrackDef[] {
+  return [...TRACK_LIST, ...loadCustomTracks()];
 }

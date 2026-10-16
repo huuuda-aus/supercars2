@@ -13,7 +13,14 @@ export interface TrackQuery {
   slope: number; // road gradient (rise per metre) along the direction of increasing sample index
 }
 
-import { THEMES, type TrackDef } from './tracks';
+import { detectCrossings, SAMPLE_SPACING, settleCrossings, THEMES, type SettledCrossing, type TrackDef } from './tracks';
+
+/** A crossing with its type settled and the strands told apart. */
+export interface ResolvedCrossing extends SettledCrossing {
+  /** Sample index of the strand that goes over (ramp, bridge) and of the one underneath; for a level crossing a and b. */
+  overIndex: number;
+  underIndex: number;
+}
 
 /** Index used for the jump and crossing on circuits that have none (see the constructor). */
 const NO_JUMP = -100000;
@@ -76,6 +83,11 @@ const CROSSING_FLAT = 30; // samples
 const CROSSING_BLEND = 40;
 const CROSSING_NO_WALLS = 30;
 
+/** A bridge: the road climbs to this height over the crossing road, with ramps of this length (m) either side. */
+const BRIDGE_HEIGHT = 5.5;
+const BRIDGE_RAMP = 45;
+const BRIDGE_DECK = 0.9; // thickness of the slab under the road
+
 /**
  * The jump: a ramp up to a sharp lip, a pit as long as the road is wide (no road in it), then the same
  * ramp mirrored back down. Both ramps share one profile, so they have identical height and length. A car
@@ -106,10 +118,14 @@ export class Track {
   readonly gapTo: number; // first road sample after the pit (top of the landing ramp)
   readonly respawnIndex: number; // where cars restart after falling into the pit
   readonly crossingIndex: number; // where the other strand passes under the jump (at ground level)
+  readonly crossings: ResolvedCrossing[];
+  readonly deck: THREE.Mesh; // the slabs under bridges
+  private terrainHole: boolean[] = []; // samples where the road is too high above the ground for an embankment beside it
+  private readonly bridgeSamples = new Set<number>(); // samples that are on a flyover (for the slab underneath)
   private readonly searchWindow = 40;
 
   readonly sampleCount: number;
-  readonly hasJump: boolean; // the figure-eight has a pit to jump; other circuits do not
+  readonly hasJump: boolean; // a ramp crossing (a pit to jump) exists on this circuit
   /** Middle and half-size of the circuit's footprint, for cameras. */
   readonly centre = new THREE.Vector2();
   readonly extent: number;
@@ -121,9 +137,8 @@ export class Track {
       'centripetal',
     );
     // About one sample every 1.07 m on any circuit, because the AI and the pickups reason in samples.
-    const sampleCount = Math.round(curve.getLength() / 1.07);
+    const sampleCount = Math.max(40, Math.round(curve.getLength() / SAMPLE_SPACING));
     this.sampleCount = sampleCount;
-    this.hasJump = def.jump;
     for (let i = 0; i < sampleCount; i++) {
       const t = i / sampleCount;
       const p = curve.getPointAt(t);
@@ -142,13 +157,18 @@ export class Track {
 
     // Without a jump the "gap" and "crossing" indices are parked far outside the track, so that every zone test
     // built on them (AI run-up, weapon bans near the jump...) is simply false.
-    const gap = def.jump ? this.jumpLayout() : { from: NO_JUMP, to: NO_JUMP };
-    this.crossingIndex = def.jump ? this.findCrossing() : NO_JUMP;
+    this.terrainHole = new Array(sampleCount).fill(false);
+    this.crossings = this.resolveCrossings(def);
+    const ramp = this.crossings.find((c) => c.type === 'ramp');
+    this.hasJump = !!ramp;
+    const gap = ramp ? this.jumpLayout(ramp.overIndex) : { from: NO_JUMP, to: NO_JUMP };
+    this.crossingIndex = ramp ? ramp.underIndex : NO_JUMP;
     this.addRolling(gap.from, gap.to);
-    if (def.jump) this.addJump(gap);
+    if (ramp) this.addJump(gap);
+    for (const c of this.crossings) if (c.type === 'bridge') this.addBridge(c);
     this.gapFrom = gap.from;
     this.gapTo = gap.to;
-    this.respawnIndex = def.jump ? (gap.from - 65 + sampleCount) % sampleCount : 0;
+    this.respawnIndex = ramp ? (gap.from - 65 + sampleCount) % sampleCount : 0;
 
     let minX = Infinity;
     let maxX = -Infinity;
@@ -169,6 +189,7 @@ export class Track {
     this.kerbs = this.buildKerbs();
     this.terrain = this.buildTerrain();
     this.pit = this.buildPit();
+    this.deck = this.buildDeck();
     this.finishLine = this.buildFinishLine();
   }
 
@@ -184,36 +205,64 @@ export class Track {
     const lowest = Math.min(...heights);
     this.samples.forEach((s, i) => {
       // Ground level (exactly 0) under the jump, easing back into the hills on either side.
-      const away = Math.max(Math.abs(i - this.crossingIndex) - CROSSING_FLAT, 0);
+      const away = Math.max(this.nearestCrossingDistance(i) - CROSSING_FLAT, 0);
       s.p.y += (heights[i] - lowest) * smooth(away / CROSSING_BLEND);
     });
   }
 
-  /** The sample where the strand that runs under the jump is closest to the jump's position. */
-  private findCrossing(): number {
-    const n = this.sampleCount;
-    let best = n - 1;
-    let bestD = Infinity;
-    for (let i = Math.floor(n / 2); i < n; i++) {
-      const d = (this.samples[i].p.x - JUMP.x) ** 2 + (this.samples[i].p.z - JUMP.z) ** 2;
-      if (d < bestD) { bestD = d; best = i; }
-    }
+  /** Distance (samples, round the loop) from sample i to the nearest crossing on either strand; huge when there is none. */
+  private nearestCrossingDistance(i: number): number {
+    let best = Infinity;
+    for (const c of this.crossings) best = Math.min(best, this.loopDistance(i, c.a), this.loopDistance(i, c.b));
     return best;
   }
 
+  private loopDistance(i: number, j: number): number {
+    const d = Math.abs(i - j);
+    return Math.min(d, this.sampleCount - d);
+  }
+
+  /**
+   * Find where the circuit crosses itself and settle each crossing: the drawn setting nearest to it (within 40 m), or a
+   * plain level crossing. Only one ramp is possible (the AI plans its run-up for one), and it cannot sit within 35
+   * samples of the start line; any other falls back to a level crossing.
+   */
+  private resolveCrossings(def: TrackDef): ResolvedCrossing[] {
+    const positions = this.samples.map((s) => ({ x: s.p.x, z: s.p.z }));
+    const tangents = this.samples.map((s) => ({ x: s.tangent.x, z: s.tangent.z }));
+    const settings = def.crossings ?? (def.jump ? [{ x: 0, z: 0, type: 'ramp' as const, over: 'first' as const }] : []);
+    return settleCrossings(detectCrossings(positions, tangents), settings, this.sampleCount).map((c) => ({
+      ...c,
+      overIndex: c.over === 'first' ? c.a : c.b,
+      underIndex: c.over === 'first' ? c.b : c.a,
+    }));
+  }
+
   /** Which samples are the lip and the landing of the jump (the pit lies between them). */
-  private jumpLayout(): { from: number; to: number } {
-    const n = this.sampleCount;
-    let centre = 0;
-    let best = Infinity;
-    for (let i = 0; i < Math.floor(n / 2); i++) { // the jump is on the first strand; the second runs beneath it
-      const d = (this.samples[i].p.x - JUMP.x) ** 2 + (this.samples[i].p.z - JUMP.z) ** 2;
-      if (d < best) { best = d; centre = i; }
-    }
+  private jumpLayout(centre: number): { from: number; to: number } {
     // The road it crosses over, plus a metre each side, in an even number of samples so the pit is centred on the crossing.
     const span = 2 * Math.ceil((2 * this.halfWidth + 2) / this.spacing / 2);
     const from = centre - Math.floor(span / 2);
     return { from, to: from + span };
+  }
+
+  /**
+   * Raise the road into a flyover across a crossing: it climbs on smooth ramps to a deck long enough to span the other
+   * road (longer when the roads cross at a shallow angle). The embankments beside the raised stretch are dropped so the
+   * road underneath can run through.
+   */
+  private addBridge(c: ResolvedCrossing): void {
+    const n = this.sampleCount;
+    const ramp = Math.round(BRIDGE_RAMP / this.spacing);
+    const deckHalf = Math.round(Math.min(45, Math.max(16, (this.halfWidth + 4) / Math.max(Math.sin(c.angle), 0.35))) / this.spacing);
+    const smooth = (t: number) => { const x = Math.min(1, Math.max(0, t)); return x * x * (3 - 2 * x); };
+    for (let k = -(ramp + deckHalf); k <= ramp + deckHalf; k++) {
+      const i = (((c.overIndex + k) % n) + n) % n;
+      const lift = BRIDGE_HEIGHT * smooth((ramp + deckHalf - Math.abs(k)) / ramp);
+      this.samples[i].p.y += lift;
+      if (lift > 0.9) this.terrainHole[i] = true;
+      if (lift > 0.15) this.bridgeSamples.add(i);
+    }
   }
 
   /** Builds the ramp-pit-ramp profile on top of the rolling terrain. */
@@ -233,6 +282,77 @@ export class Track {
     const y0 = this.samples[from].p.y;
     const y1 = this.samples[to].p.y;
     for (let i = from + 1; i < to; i++) this.samples[i].p.y += y0 + ((y1 - y0) * (i - from)) / span;
+  }
+
+  /**
+   * No barrier here: another road goes over the top of this one (the strand underneath a ramp or bridge).
+   */
+  private wallsOmitted(i: number): boolean {
+    for (const c of this.crossings) {
+      // (Level crossings are not here: their walls are trimmed exactly to the other road, see levelCrossingClearance.)
+      if (c.type !== 'level' && this.loopDistance(i, c.underIndex) <= CROSSING_NO_WALLS) return true;
+    }
+    return false;
+  }
+
+  /**
+   * The underside of the lowest bridge deck above height `belowY` that covers the ground position (x, z), or Infinity if
+   * nothing is overhead. For keeping a camera from poking through a flyover.
+   */
+  ceilingAt(x: number, z: number, belowY: number): number {
+    if (!this.bridgeSamples.size) return Infinity;
+    const reach = this.wallOffset + this.wallThickness + this.spacing;
+    let ceiling = Infinity;
+    for (const i of this.bridgeSamples) {
+      const p = this.samples[i].p;
+      const underside = p.y - BRIDGE_DECK;
+      if (underside <= belowY || underside >= ceiling) continue;
+      if ((p.x - x) ** 2 + (p.z - z) ** 2 <= reach * reach) ceiling = underside;
+    }
+    return ceiling;
+  }
+
+  /** Sample i lies where another road crosses this one on the same level: no edge lines or kerbs there. */
+  private inLevelCrossing(i: number): boolean {
+    for (const c of this.crossings) {
+      if (c.type !== 'level') continue;
+      // Half the stretch the other road covers along this one: wider when the roads cross at a shallow angle.
+      const half = Math.ceil((this.halfWidth + 3) / Math.max(Math.sin(c.angle), 0.35) / this.spacing);
+      if (this.loopDistance(i, c.a) <= half || this.loopDistance(i, c.b) <= half) return true;
+    }
+    return false;
+  }
+
+  /** The slabs under the raised stretches of road (bridges), so the flyover has a visible thickness. */
+  private buildDeck(): THREE.Mesh {
+    const n = this.sampleCount;
+    const pos: number[] = [];
+    const idx: number[] = [];
+    // The slab reaches out to the barriers (the shoulder beside a flyover is concrete, there is no bank there).
+    const hw = this.wallOffset + this.wallThickness;
+    for (let i = 0; i < n; i++) {
+      const next = (i + 1) % n;
+      if (!this.bridgeSamples.has(i) || !this.bridgeSamples.has(next)) continue;
+      const corner = (k: number, side: number, drop: number) => {
+        const { p, tangent } = this.samples[k];
+        return [p.x - tangent.z * hw * side, p.y - drop, p.z + tangent.x * hw * side];
+      };
+      const base = pos.length / 3;
+      // The four corners of this slab segment at the top (road level) and the bottom (a slab below), left and right.
+      pos.push(...corner(i, 1, 0.04), ...corner(i, -1, 0.04), ...corner(next, 1, 0.04), ...corner(next, -1, 0.04));
+      pos.push(...corner(i, 1, BRIDGE_DECK), ...corner(i, -1, BRIDGE_DECK), ...corner(next, 1, BRIDGE_DECK), ...corner(next, -1, BRIDGE_DECK));
+      // sides (left, right) and underside
+      idx.push(base, base + 2, base + 4, base + 4, base + 2, base + 6);
+      idx.push(base + 1, base + 5, base + 3, base + 3, base + 5, base + 7);
+      idx.push(base + 4, base + 6, base + 5, base + 5, base + 6, base + 7);
+      // the top surface out to the barriers (the road mesh lies just above it)
+      idx.push(base, base + 1, base + 2, base + 2, base + 1, base + 3);
+    }
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    g.setIndex(idx);
+    g.computeVertexNormals();
+    return new THREE.Mesh(g, new THREE.MeshLambertMaterial({ color: 0x8e929a, side: THREE.DoubleSide }));
   }
 
   /** The quad between samples k and k+1 lies over the pit. */
@@ -301,7 +421,7 @@ export class Track {
     const red = [0.82, 0.1, 0.1];
     const white = [0.95, 0.95, 0.95];
     for (let k = 0; k < n; k++) {
-      if (k >= this.gapFrom && k < this.gapTo) continue;
+      if ((k >= this.gapFrom && k < this.gapTo) || this.inLevelCrossing(k)) continue;
       const r = rate[k];
       if (Math.abs(r) < TURN_RATE) continue;
       // The inside of the bend is the side the tangent turns toward.
@@ -347,7 +467,7 @@ export class Track {
       const offset = side * (this.halfWidth - inset);
       let base = -1; // vertex index of the previous sample in the current run, -1 when a run is not open
       for (let k = 0; k <= n; k++) {
-        const over = k > this.gapFrom && k < this.gapTo; // no road over the pit
+        const over = (k > this.gapFrom && k < this.gapTo) || this.inLevelCrossing(k % n); // no road over the pit; no edge line across another road
         if (over) {
           base = -1;
           continue;
@@ -446,7 +566,7 @@ export class Track {
         }
       }
       for (let i = 0; i < n; i++) {
-        if (this.isGapQuad(i)) continue;
+        if (this.isGapQuad(i) || this.terrainHole[i] || this.terrainHole[(i + 1) % n]) continue;
         const a = base + i * 2;
         const b = base + ((i + 1) % n) * 2;
         idx.push(a, a + 1, b, b, a + 1, b + 1);
@@ -477,33 +597,65 @@ export class Track {
     const idx: number[] = [];
     const sideColor = new THREE.Color(0xa9adb5);
     const topColor = new THREE.Color(0xf2f2f2);
-
-    // A strip of quads running along the track between two rails of (lateral offset, height) pairs.
-    // A height of 'base' means the bottom of the wall, which rests on the road's edge.
-    const addStrip = (side: number, d0: number, h0: number | 'base', d1: number, h1: number | 'base', color: THREE.Color) => {
-      const base = pos.length / 3;
-      for (let i = 0; i < n; i++) {
-        const { p, tangent } = this.samples[i];
-        const bottom = 0;
-        for (const [d, h] of [[d0, h0], [d1, h1]] as [number, number | 'base'][]) {
-          pos.push(p.x - tangent.z * d * side, p.y + (h === 'base' ? bottom : h), p.z + tangent.x * d * side);
-          col.push(color.r, color.g, color.b);
-        }
-      }
-      for (let i = 0; i < n; i++) {
-        if (this.isGapQuad(i) || Math.abs(i - this.crossingIndex) <= CROSSING_NO_WALLS) continue;
-        const a = base + i * 2;
-        const b = base + ((i + 1) % n) * 2;
-        idx.push(a, a + 1, b, b, a + 1, b + 1);
-      }
-    };
-
     const inner = this.wallOffset;
     const outer = this.wallOffset + this.wallThickness;
-    for (const side of [1, -1]) {
-      addStrip(side, inner, 'base', inner, this.wallHeight, sideColor); // road-facing face
-      addStrip(side, inner, this.wallHeight, outer, this.wallHeight, topColor); // top
-      addStrip(side, outer, this.wallHeight, outer, 'base', sideColor); // outer face
+    const H = this.wallHeight;
+
+    // How far each wall point is outside the other road's corridor at a level crossing (negative = inside it), per side.
+    const edge = [this.levelCrossingClearance(1), this.levelCrossingClearance(-1)];
+    const sides = [1, -1];
+
+    /** The part (fractions of the quad from sample i to i+1) of a side's wall that is built, or null. */
+    const kept = (i: number, s: number): [number, number] | null => {
+      if (this.isGapQuad(i) || this.wallsOmitted(i)) return null;
+      const f0 = edge[s === 1 ? 0 : 1][i];
+      const f1 = edge[s === 1 ? 0 : 1][(i + 1) % n];
+      if (f0 >= 0 && f1 >= 0) return [0, 1];
+      if (f0 < 0 && f1 < 0) return null;
+      const t = f0 / (f0 - f1); // where the wall leaves (or enters) the other road's corridor
+      return f0 >= 0 ? [0, t] : [t, 1];
+    };
+
+    /** A point on a rail of the wall (lateral offset d, height h above the road) a fraction t along quad i. */
+    const rail = (i: number, t: number, s: number, d: number, h: number): number[] => {
+      const A = this.samples[i];
+      const B = this.samples[(i + 1) % n];
+      let tx = A.tangent.x + (B.tangent.x - A.tangent.x) * t;
+      let tz = A.tangent.z + (B.tangent.z - A.tangent.z) * t;
+      const len = Math.hypot(tx, tz) || 1;
+      tx /= len;
+      tz /= len;
+      return [A.p.x + (B.p.x - A.p.x) * t - tz * d * s, A.p.y + (B.p.y - A.p.y) * t + h, A.p.z + (B.p.z - A.p.z) * t + tx * d * s];
+    };
+
+    const quad = (a: number[], b: number[], c: number[], d: number[], color: THREE.Color) => {
+      const base = pos.length / 3;
+      for (const v of [a, b, c, d]) {
+        pos.push(...v);
+        col.push(color.r, color.g, color.b);
+      }
+      idx.push(base, base + 1, base + 2, base + 2, base + 1, base + 3);
+    };
+
+    for (const s of sides) {
+      for (let i = 0; i < n; i++) {
+        const range = kept(i, s);
+        if (!range) continue;
+        const [t0, t1] = range;
+        // road-facing face, top, outer face
+        quad(rail(i, t0, s, inner, 0), rail(i, t0, s, inner, H), rail(i, t1, s, inner, 0), rail(i, t1, s, inner, H), sideColor);
+        quad(rail(i, t0, s, inner, H), rail(i, t0, s, outer, H), rail(i, t1, s, inner, H), rail(i, t1, s, outer, H), topColor);
+        quad(rail(i, t0, s, outer, H), rail(i, t0, s, outer, 0), rail(i, t1, s, outer, H), rail(i, t1, s, outer, 0), sideColor);
+        // End caps where the wall stops (at a crossing, or beside the pit), so it ends in a clean solid face.
+        const before = kept((i + n - 1) % n, s);
+        const after = kept((i + 1) % n, s);
+        if (t0 > 1e-6 || !before || before[1] < 1 - 1e-6) {
+          quad(rail(i, t0, s, inner, 0), rail(i, t0, s, outer, 0), rail(i, t0, s, inner, H), rail(i, t0, s, outer, H), sideColor);
+        }
+        if (t1 < 1 - 1e-6 || !after || after[0] > 1e-6) {
+          quad(rail(i, t1, s, inner, 0), rail(i, t1, s, outer, 0), rail(i, t1, s, inner, H), rail(i, t1, s, outer, H), sideColor);
+        }
+      }
     }
     const g = new THREE.BufferGeometry();
     g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
@@ -513,12 +665,53 @@ export class Track {
     return new THREE.Mesh(g, new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.DoubleSide }));
   }
 
+  /**
+   * For each sample, how far its wall (on one side) is clear of the road that crosses it on the same level: the distance
+   * from the wall's inner face to the other road's centreline, minus the wall offset. Positive = the wall stands,
+   * negative = it is inside the other road's corridor and must stop. Infinity away from any level crossing.
+   */
+  private levelCrossingClearance(side: number): Float32Array {
+    const n = this.sampleCount;
+    const out = new Float32Array(n).fill(Infinity);
+    for (const c of this.crossings) {
+      if (c.type !== 'level') continue;
+      const zone = Math.min(110, Math.ceil((this.wallOffset + this.wallThickness + 4) / Math.max(Math.sin(c.angle), 0.3) / this.spacing) + 8);
+      for (const [own, other] of [[c.a, c.b], [c.b, c.a]]) {
+        for (let k = -zone; k <= zone; k++) {
+          const i = (((own + k) % n) + n) % n;
+          const { p, tangent } = this.samples[i];
+          const x = p.x - tangent.z * this.wallOffset * side;
+          const z = p.z + tangent.x * this.wallOffset * side;
+          out[i] = Math.min(out[i], this.distanceToStrand(x, z, other, zone + 25) - this.wallOffset);
+        }
+      }
+    }
+    return out;
+  }
+
+  /** Distance from (x, z) to the road's centreline within `reach` samples either side of sample `centre`. */
+  private distanceToStrand(x: number, z: number, centre: number, reach: number): number {
+    const n = this.sampleCount;
+    let best = Infinity;
+    for (let k = -reach; k < reach; k++) {
+      const a = this.samples[(((centre + k) % n) + n) % n].p;
+      const b = this.samples[(((centre + k + 1) % n) + n) % n].p;
+      const dx = b.x - a.x;
+      const dz = b.z - a.z;
+      const len2 = dx * dx + dz * dz || 1;
+      const u = Math.min(1, Math.max(0, ((x - a.x) * dx + (z - a.z) * dz) / len2));
+      best = Math.min(best, Math.hypot(x - (a.x + dx * u), z - (a.z + dz * u)));
+    }
+    return best;
+  }
+
   /** The two sheer faces of the ramps either side of the gap. The ground beneath is the other road and grass. */
   private buildPit(): THREE.Mesh {
     if (!this.hasJump) return new THREE.Mesh(new THREE.BufferGeometry(), new THREE.MeshBasicMaterial());
     const outer = this.wallOffset + this.wallThickness;
     const floor = this.pitFloor + 0.01;
-    const face = new THREE.Color(0x7d6a4c);
+    const face = new THREE.Color(THEMES[this.def.theme].embankment).multiplyScalar(0.8); // the cut earth, a shade darker than the bank
+    const dirt = new THREE.Color(THEMES[this.def.theme].embankment);
     const pos: number[] = [];
     const col: number[] = [];
     const idx: number[] = [];
@@ -536,7 +729,12 @@ export class Track {
     };
     for (const sample of [this.gapFrom, this.gapTo]) {
       const top = this.samples[sample].p.y;
+      // The cut face is the whole cross-section of the ramp: the road and shoulders, and the banks that slope down
+      // beside them (45 degrees, as wide as they are high). Closing the banks too stops the cut looking hollow.
+      const reach = outer + Math.max(top, 0);
       quad([at(sample, -outer, floor), at(sample, outer, floor), at(sample, outer, top), at(sample, -outer, top)], face);
+      quad([at(sample, -reach, floor), at(sample, -outer, floor), at(sample, -outer, top), at(sample, -outer, top)], dirt);
+      quad([at(sample, outer, floor), at(sample, reach, floor), at(sample, outer, top), at(sample, outer, top)], dirt);
     }
     const g = new THREE.BufferGeometry();
     g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
