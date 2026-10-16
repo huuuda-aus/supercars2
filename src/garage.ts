@@ -23,3 +23,23 @@ export const GARAGE: GarageCar[] = [
 export function garageCar(id: CarId): GarageCar {
   return GARAGE.find((c) => c.id === id) ?? GARAGE[0];
 }
+
+/** The sixteen paint colours on offer in the garage. */
+export const PALETTE: { name: string; color: number }[] = [
+  { name: 'Red', color: 0xd8352a },
+  { name: 'Orange', color: 0xe8731a },
+  { name: 'Amber', color: 0xe8a317 },
+  { name: 'Yellow', color: 0xf0d53a },
+  { name: 'Lime', color: 0x8bc53f },
+  { name: 'Green', color: 0x2f9e4f },
+  { name: 'Teal', color: 0x1fa89a },
+  { name: 'Cyan', color: 0x30b8e0 },
+  { name: 'Sky blue', color: 0x4a90e2 },
+  { name: 'Blue', color: 0x2f56c8 },
+  { name: 'Indigo', color: 0x5b3fb8 },
+  { name: 'Purple', color: 0x9a45c8 },
+  { name: 'Pink', color: 0xe55aa5 },
+  { name: 'White', color: 0xf2f2f2 },
+  { name: 'Silver', color: 0xb0b4bc },
+  { name: 'Black', color: 0x22252a },
+];

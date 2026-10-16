@@ -12,7 +12,9 @@ import { PICKUP_COLOURS, Pickups } from './pickups';
 import { buildCarModel } from './carmodel';
 import { cleanName, loadGame, loadSettings, newGame, prizeFor, saveGame, saveSettings, type SaveGame } from './save';
 import { Screens } from './screens';
-import { allTracks, THEMES, trackForRace, TRACK_LIST, trackLength, type Theme, type TrackDef } from './tracks';
+import { scoreRace, type ScoreBreakdown } from './score';
+import { submitLap } from './records';
+import { allTracks, THEMES, trackForRace, TRACK_LIST, type Theme, type TrackDef } from './tracks';
 import { formatTime, Race } from './race';
 import { applyGroundUVs, createTrees, makeGroundTexture } from './scenery';
 import { Skidmarks } from './skidmarks';
@@ -113,6 +115,12 @@ allCars.forEach((c) => {
 const weapons = new Weapons(scene);
 let pickupMsg = '';
 let raceCash = 0; // cash crates picked up in this race; banked when you finish it (career only)
+// Lap timing for the score: the player's laps this race, and how many of them improved the track record.
+let raceLapRecords = 0;
+let bestLapThisRace: number | null = null;
+let lapStartedAt = 0;
+let lastPlayerLap = 0;
+let currentTrackId = '';
 let pickupMsgTime = 0;
 const race = new Race();
 
@@ -173,6 +181,7 @@ function loadTrack(def: TrackDef): void {
   weapons.setTrack(track);
   race.totalLaps = def.laps;
   loadedTrackKey = trackKey(def);
+  currentTrackId = def.id;
 }
 let levelIndex = loadSettings().difficulty;
 let weaponsEnabled = loadSettings().weapons;
@@ -197,6 +206,10 @@ function gridSlot(slot: number): { index: number; lane: number } {
 
 function resetRace(): void {
   raceCash = 0;
+  raceLapRecords = 0;
+  bestLapThisRace = null;
+  lapStartedAt = 0;
+  lastPlayerLap = 0;
   weapons.clear();
   skidmarks.clear();
   pickups.reset();
@@ -302,14 +315,43 @@ stage.position.y = -0.1;
 previewScene.add(stage);
 const previewCam = new THREE.PerspectiveCamera(38, 1, 0.1, 100);
 previewCam.position.set(7, 3.2, 7.5);
-previewCam.lookAt(-2, 0.8, 0.5); // looks left of the car, so the car sits right of the menu panel
+const lookRight = new THREE.Vector3(-2, 0.8, 0.5); // looks left of the car, so the car sits right of the menu panel (car chooser)
+const lookLeft = new THREE.Vector3(2.8, 0.9, -2.6); // looks right of it, so the car sits in the left column (garage)
+let previewSide: 'left' | 'right' = 'right';
+previewCam.lookAt(lookRight);
+const previewHome = previewCam.position.clone();
+const previewDirection = previewHome.clone().normalize();
+const CAR_RADIUS = 2.4; // metres: a circle that holds the car however it is turned
+/**
+ * Aim the preview camera so the spinning car fills the garage's car window (a rectangle of the screen): back off until
+ * it is about 80% of the window's size, and look to one side of and above/below the car so it lands at the window's centre.
+ */
+function framePreviewIn(rect: DOMRect): void {
+  const centre = new THREE.Vector3(0, 0.8, 0);
+  const tanHalf = Math.tan(THREE.MathUtils.degToRad(previewCam.fov / 2));
+  const size = Math.max(60, Math.min(rect.width, rect.height)); // the car's turning circle must fit the smaller side
+  // screen length of the car's circle = 2R * H / (2 * dist * tanHalf), wanted = 0.8 * size.
+  const distance = (CAR_RADIUS * 2 * innerHeight) / (2 * tanHalf * 0.8 * size);
+  previewCam.position.copy(previewDirection).multiplyScalar(distance).add(centre);
+  const forward = centre.clone().sub(previewCam.position).normalize();
+  const right = new THREE.Vector3().crossVectors(forward, new THREE.Vector3(0, 1, 0)).normalize();
+  const up = new THREE.Vector3().crossVectors(right, forward).normalize();
+  const halfH = distance * tanHalf;
+  const halfW = halfH * previewCam.aspect;
+  const nx = ((rect.left + rect.width / 2) / innerWidth) * 2 - 1;
+  const ny = 1 - ((rect.top + rect.height / 2) / innerHeight) * 2;
+  // Shifting the look-at point one way moves the car on screen the other way.
+  const target = centre.clone().addScaledVector(right, -nx * halfW).addScaledVector(up, -ny * halfH);
+  previewCam.lookAt(target);
+}
+
 let previewModel: THREE.Group | null = null;
 let previewing = false;
 
-function setPreview(id: CarId): void {
+function setPreview(id: CarId, color?: number): void {
   if (previewModel) previewScene.remove(previewModel);
   const def = garageCar(id);
-  previewModel = buildCarModel(def.color, def.style).group;
+  previewModel = buildCarModel(color ?? def.color, def.style).group;
   previewScene.add(previewModel);
 }
 
@@ -328,10 +370,10 @@ function setRaceUi(on: boolean): void {
 }
 
 /** Put a different car under the player, with the stats in `playerStats`. */
-function setPlayerCar(id: CarId): void {
+function setPlayerCar(id: CarId, color?: number): void {
   const def = garageCar(id);
   scene.remove(car.mesh);
-  car = new Car(playerName, def.color, playerStats, def.style);
+  car = new Car(playerName, color ?? def.color, playerStats, def.style);
   scene.add(car.mesh);
   shade(car.mesh, true, true);
   allCars[0] = car;
@@ -357,12 +399,12 @@ function startRace(): void {
   if (careerGame) {
     playerStats = statsFor(careerGame.levels);
     playerName = careerGame.name;
-    setPlayerCar(careerGame.carId);
+    setPlayerCar(careerGame.carId, careerGame.color);
   } else {
     playerStats = starterStats();
     const saved = loadGame();
     playerName = saved?.name ?? 'You';
-    setPlayerCar(saved?.carId ?? GARAGE[GARAGE.length - 1].id);
+    setPlayerCar(saved?.carId ?? GARAGE[GARAGE.length - 1].id, saved?.color);
   }
   pickups.weaponsEnabled = weaponsEnabled;
   resetRace();
@@ -385,8 +427,10 @@ function finishRace(): void {
   }
   const position = race.standings(allCars, track).indexOf(car) + 1;
   const prize = prizeFor(position);
+  const score = currentScore();
   careerGame.money += prize + raceCash;
-  careerGame.lastRace = { track: raceTrackName(), position, finished: car.finished, prize, cash: raceCash };
+  careerGame.score += score.total;
+  careerGame.lastRace = { track: raceTrackName(), position, finished: car.finished, prize, cash: raceCash, score: score.total };
   careerGame.racesDone++;
   saveGame(careerGame);
   showShop(careerGame);
@@ -428,6 +472,7 @@ function showNameEntry(): void {
 function showCarSelect(name: string): void {
   enterMenu(() => {
     previewing = true;
+    previewSide = 'right';
     screens.showCarSelect({
       onPreview: setPreview,
       onPick: (id) => {
@@ -445,7 +490,7 @@ function showTrainingTracks(): void {
   trainingList = allTracks();
   enterMenu(() =>
     screens.showTracks({
-      tracks: trainingList.map((t) => ({ name: t.name, description: `${t.description}  ·  ${t.laps} laps, ${Math.round(trackLength(t))} m` })),
+      tracks: trainingList,
       onPick: (i) => {
         trainingTrack = i;
         startRace();
@@ -490,8 +535,11 @@ function showShop(game: SaveGame, focus?: UpgradeSlot): void {
   careerGame = game;
   playerStats = statsFor(game.levels);
   playerName = game.name;
-  setPlayerCar(game.carId);
-  enterMenu(() =>
+  setPlayerCar(game.carId, game.color);
+  enterMenu(() => {
+    previewing = true;
+    previewSide = 'left';
+    setPreview(game.carId, game.color);
     screens.showShop({
       game,
       carName: garageCar(game.carId).name,
@@ -499,18 +547,30 @@ function showShop(game: SaveGame, focus?: UpgradeSlot): void {
       gridPosition: gridSlotFor(game) + 1,
       focus,
       onBuy: (slot) => buyUpgrade(game, slot),
+      color: game.color,
+      onColor: (color) => {
+        game.color = color;
+        saveGame(game);
+        setPreview(game.carId, color);
+      },
       onNextRace: startRace,
       onMenu: showTitle,
-    }),
-  );
+    });
+  });
 }
 
 /** Menu frames: no simulation, just a slowly circling view of the track (or the turntable in the car chooser). */
 function renderMenu(now: number): void {
   if (previewing && previewModel) {
-    previewModel.rotation.y = now / 1700;
+    previewModel.rotation.y = now / (previewSide === 'left' ? 4200 : 1700); // the garage car turns slowly
     previewCam.aspect = innerWidth / innerHeight;
     previewCam.updateProjectionMatrix();
+    const window3d = previewSide === 'left' ? document.querySelector('.car-window') : null;
+    if (window3d) framePreviewIn(window3d.getBoundingClientRect());
+    else {
+      previewCam.position.copy(previewHome);
+      previewCam.lookAt(previewSide === 'left' ? lookLeft : lookRight);
+    }
     renderer.render(previewScene, previewCam);
     return;
   }
@@ -561,6 +621,13 @@ function raceKeys(): void {
   }
 }
 
+/** The score for the race as it stands (final once you have finished or been wrecked). */
+function currentScore(): ScoreBreakdown {
+  const position = race.standings(allCars, track).indexOf(car) + 1;
+  const destroyed = rivals.filter((r) => r.car.wrecked && r.car.killedBy === car).length;
+  return scoreRace(position, allCars.length, destroyed, raceLapRecords, bestLapThisRace);
+}
+
 function bannerText(): string {
   if (race.state === 'countdown') return `${Math.ceil(race.countdown)}\n\nhold ↑ to rev`;
   if (car.finished || car.wrecked) {
@@ -571,7 +638,14 @@ function bannerText(): string {
       const prize = careerGame ? `  $${prizeFor(i + 1)}` : '';
       return `${i + 1}. ${c.name.padEnd(width)} ${t.padEnd(8)}${prize}${c === car ? '  <' : ''}`;
     });
-    return `${car.wrecked ? 'WRECKED' : 'FINISHED'}\n\n${rows.join('\n')}\n\n${careerGame ? `Cash picked up: $${raceCash}\n` : ''}Enter: continue · R: restart · Esc: quit`;
+    const sc = currentScore();
+    const points = [
+      `Place ${sc.position}`.padEnd(22) + `+${sc.placement}`,
+      `Destroyed ${sc.destroyed} x 50`.padEnd(22) + `+${sc.destroyedPoints}`,
+      `Lap records ${sc.lapRecords} x 10`.padEnd(22) + `+${sc.lapRecordPoints}`,
+    ];
+    const best = sc.bestLap !== null ? `Best lap ${formatTime(sc.bestLap)}\n` : '';
+    return `${car.wrecked ? 'WRECKED' : 'FINISHED'}\n\n${rows.join('\n')}\n\nSCORE\n${points.join('\n')}\n${best}TOTAL ${sc.total}${careerGame ? '' : ' (training: not saved)'}\n\n${careerGame ? `Cash picked up: $${raceCash}\n` : ''}Enter: continue · R: restart · Esc: quit`;
   }
   return race.time < 1 ? 'GO!' : '';
 }
@@ -612,6 +686,16 @@ function frame(now: number): void {
     if (race.state === 'racing' && !car.finished && input.held('KeyF')) weapons.fireGun(car);
     race.update(STEP, allCars);
     car.step(STEP, controlsFor(car, input), track);
+    // Lap times: a lap is complete when the lap counter ticks up (the first tick is only crossing the line to start).
+    if (race.state === 'racing' && car.lap > lastPlayerLap) {
+      if (lastPlayerLap >= 1) {
+        const lapTime = race.time - lapStartedAt;
+        if (bestLapThisRace === null || lapTime < bestLapThisRace) bestLapThisRace = lapTime;
+        if (submitLap(currentTrackId, lapTime)) raceLapRecords++;
+      }
+      lapStartedAt = race.time;
+      lastPlayerLap = car.lap;
+    }
     for (const [i, r] of rivals.entries()) {
       r.ai.update(STEP, race.state === 'racing');
       if (race.state === 'racing' && !r.car.finished) {

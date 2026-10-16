@@ -1,10 +1,49 @@
 import type { UiSound } from './audio';
-import { GARAGE, type CarId } from './garage';
+import { GARAGE, PALETTE, type CarId } from './garage';
 import { MAX_NAME_LENGTH, type SaveGame } from './save';
-import type { TrackDef } from './tracks';
+import { loadRecords } from './records';
+import { detectCrossings, sampleLoop, settleCrossings, trackLength, type CrossingType, type TrackDef } from './tracks';
 
 /** What the track lists show of a circuit. */
 type TrackInfo = Pick<TrackDef, 'name' | 'description'>;
+
+const formatLap = (t: number) => `${Math.floor(t / 60)}:${(t % 60).toFixed(1).padStart(4, '0')}`;
+
+const CROSSING_COLOUR: Record<CrossingType, string> = { level: '#ffd23a', ramp: '#ff6a4a', bridge: '#5fb0ff' };
+
+/** A drawing of the circuit (a 100 x 100 SVG): the road to scale-ish, the start line, and its crossings. */
+function trackPreviewSvg(def: TrackDef): string {
+  const loop = sampleLoop(def.points);
+  const pts = loop.positions;
+  const xs = pts.map((p) => p.x);
+  const zs = pts.map((p) => p.z);
+  const minX = Math.min(...xs), maxX = Math.max(...xs), minZ = Math.min(...zs), maxZ = Math.max(...zs);
+  const scale = 80 / Math.max(maxX - minX, maxZ - minZ, 1);
+  const ox = 50 - ((minX + maxX) / 2) * scale;
+  const oz = 50 - ((minZ + maxZ) / 2) * scale;
+  const at = (x: number, z: number) => `${(x * scale + ox).toFixed(1)},${(z * scale + oz).toFixed(1)}`;
+  const path = pts.filter((_, i) => i % 4 === 0).map((p, i) => `${i ? 'L' : 'M'}${at(p.x, p.z)}`).join(' ') + ' Z';
+  const t = loop.tangents[0];
+  const [sx, sz] = at(pts[0].x, pts[0].z).split(',').map(Number);
+  const half = 3.6;
+  const crossings = settleCrossings(detectCrossings(pts, loop.tangents), def.crossings ?? (def.jump ? [{ x: 0, z: 0, type: 'ramp', over: 'first' }] : []), pts.length);
+  const marks = crossings
+    .map((c) => {
+      const [cx, cz] = at(c.x, c.z).split(',').map(Number);
+      return `<circle cx="${cx}" cy="${cz}" r="3" fill="#10140f" stroke="${CROSSING_COLOUR[c.type]}" stroke-width="1.4"/>`;
+    })
+    .join('');
+  return (
+    `<svg viewBox="0 0 100 100" preserveAspectRatio="xMidYMid meet">` +
+    `<path d="${path}" fill="none" stroke="#9aa3ad" stroke-width="4.8" stroke-linejoin="round"/>` +
+    `<path d="${path}" fill="none" stroke="#2d3036" stroke-width="3.4" stroke-linejoin="round"/>` +
+    `<path d="${path}" fill="none" stroke="#c9ced4" stroke-width="0.35" stroke-dasharray="1.6 1.6" stroke-linejoin="round"/>` +
+    marks +
+    `<line x1="${sx - t.z * half}" y1="${sz + t.x * half}" x2="${sx + t.z * half}" y2="${sz - t.x * half}" stroke="#fff" stroke-width="1.6"/>` +
+    `<circle cx="${sx + t.x * 6}" cy="${sz + t.z * 6}" r="1.8" fill="#7be07b"/>` +
+    `</svg>`
+  );
+}
 import { formatSlotValue, MAX_UPGRADE_LEVEL, SLOT_INFO, upgradePrice, UPGRADE_SLOTS, type UpgradeSlot } from './upgrades';
 
 type Handler = () => void;
@@ -65,8 +104,9 @@ export class Screens {
   }
 
   /** Swap in a new screen, focus its first button, and register Escape as "back". */
-  private open(content: HTMLElement, back?: Handler, keys: Record<string, Handler> = {}): void {
+  private open(content: HTMLElement, back?: Handler, keys: Record<string, Handler> = {}, clear = false): void {
     this.root.hidden = false;
+    this.root.classList.toggle('clear', clear); // no dimming layer: the 3D view behind the screen shows through
     this.root.replaceChildren(content);
     this.keys = back ? { Escape: back, ...keys } : keys;
     this.quiet = true;
@@ -160,28 +200,67 @@ export class Screens {
     select(0);
   }
 
-  showTracks(o: { tracks: TrackInfo[]; onPick: (index: number) => void; onBack: Handler }): void {
-    const page = el('div', 'screen centre');
-    page.append(el('h2', '', 'Training: choose a track'));
-    const menu = el('div', 'menu');
-    o.tracks.forEach((t, i) => menu.append(this.button(t.name, () => o.onPick(i), { hint: t.description })));
-    menu.append(this.button('Back', o.onBack, { sound: 'back' }));
-    page.append(menu, el('p', 'note', 'A practice race in a stock car. Nothing is saved.'));
-    this.open(page, o.onBack);
+  /** Training: every circuit as a square tile with a drawing of its shape, across the whole width of the window. */
+  showTracks(o: { tracks: TrackDef[]; onPick: (index: number) => void; onBack: Handler }): void {
+    const page = el('div', 'screen tracks');
+    const head = el('div', 'shop-head');
+    const title = el('div', 'shop-title');
+    title.append(el('h2', '', 'Training: choose a track'), el('div', 'sub', 'A practice race in a stock car. Nothing but lap records is saved.'));
+    head.append(title, this.button('Back', o.onBack, { sound: 'back' }));
+
+    const records = loadRecords();
+    const grid = el('div', 'track-tiles');
+    o.tracks.forEach((t, i) => {
+      const tile = this.button('', () => o.onPick(i));
+      tile.className = 'track-tile';
+      tile.replaceChildren();
+      const art = el('div', `track-art theme-${t.theme}`);
+      art.innerHTML = trackPreviewSvg(t);
+      const best = records[t.id];
+      const meta = [`${t.laps} laps`, `${Math.round(trackLength(t))} m`];
+      if (best !== undefined) meta.push(`best ${formatLap(best)}`);
+      const info = el('div', 'track-info');
+      info.append(el('div', 'track-name', t.name), el('div', 'track-meta', meta.join('  ·  ')), el('div', 'track-desc', t.description));
+      if (t.id.startsWith('custom-')) tile.append(el('div', 'track-badge', 'custom'));
+      tile.append(art, info);
+      grid.append(tile);
+    });
+    page.append(head, grid);
+    const step = (n: number) => () => this.moveFocus(n);
+    this.open(page, o.onBack, { ArrowLeft: step(-1), ArrowRight: step(1) }, true);
   }
 
   showSettings(o: { levels: string[]; difficulty: number; onDifficulty: (index: number) => void; weapons: boolean; onWeapons: (on: boolean) => void; onEditor: Handler; onBack: Handler }): void {
     const page = el('div', 'screen centre');
     page.append(el('h2', '', 'Settings'), el('p', 'note', 'AI difficulty: how well the rival drivers drive and fight. Their cars are the same at every level.'));
-    const menu = el('div', 'menu');
+    // AI difficulty: a labelled row of radio pills.
+    const row = el('div', 'setting-row');
+    row.append(el('span', 'setting-label', 'Difficulty:'));
+    const pills = el('div', 'pills');
+    pills.setAttribute('role', 'radiogroup');
+    pills.setAttribute('aria-label', 'AI difficulty');
     const buttons = o.levels.map((name, i) => {
-      const b = this.button(name, () => {
+      const b = el('button', 'pill' + (i === o.difficulty ? ' selected' : ''), name);
+      b.setAttribute('role', 'radio');
+      b.setAttribute('aria-checked', String(i === o.difficulty));
+      b.addEventListener('mouseenter', () => this.onSound('hover'));
+      b.addEventListener('focus', () => {
+        if (this.keyboard && !this.quiet) this.onSound('hover');
+      });
+      b.addEventListener('click', () => {
+        this.onSound('select');
         o.onDifficulty(i);
-        buttons.forEach((x, k) => x.classList.toggle('selected', k === i));
-      }, { selected: i === o.difficulty });
-      menu.append(b);
+        buttons.forEach((x, k) => {
+          x.classList.toggle('selected', k === i);
+          x.setAttribute('aria-checked', String(k === i));
+        });
+      });
+      pills.append(b);
       return b;
     });
+    row.append(pills);
+    page.append(row);
+    const menu = el('div', 'menu');
     const weaponsNote = el('p', 'note', 'Weapons: missiles, mines, the machine gun and oil, for you and the rivals, in every race.');
     let weaponsOn = o.weapons;
     const toggle = this.button(`Weapons: ${weaponsOn ? 'ON' : 'OFF'}`, () => {
@@ -192,7 +271,8 @@ export class Screens {
     }, { selected: weaponsOn });
     menu.append(toggle, this.button('Track editor', o.onEditor, { hint: 'draw your own circuits' }), this.button('Back', o.onBack, { sound: 'back' }));
     page.append(menu, weaponsNote);
-    this.open(page, o.onBack);
+    const step = (n: number) => () => this.moveFocus(n);
+    this.open(page, o.onBack, { ArrowLeft: step(-1), ArrowRight: step(1) });
   }
 
   /** The shop between races: one tile per upgrade slot, a picture, its level and what the next level costs. */
@@ -202,6 +282,8 @@ export class Screens {
     nextTrack: TrackInfo;
     gridPosition: number; // where the player will start the next race (1 = pole)
     onBuy: (slot: UpgradeSlot) => void;
+    color: number;
+    onColor: (color: number) => void;
     onNextRace: Handler;
     onMenu: Handler;
     focus?: UpgradeSlot;
@@ -213,10 +295,10 @@ export class Screens {
     const title = el('div', 'shop-title');
     title.append(el('h2', '', 'Garage & shop'), el('div', 'sub', `${g.name}  ·  ${o.carName}  ·  ${g.racesDone} race${g.racesDone === 1 ? '' : 's'} done`));
     const wallet = el('div', 'wallet');
-    wallet.append(el('div', 'amount', money(g.money)));
+    wallet.append(el('div', 'amount', money(g.money)), el('div', 'sub', `score ${g.score.toLocaleString('en-US')}`));
     if (g.lastRace) {
       wallet.append(
-        el('div', 'sub', `last: ${g.lastRace.finished ? `P${g.lastRace.position}` : 'DNF'} at ${g.lastRace.track}${g.lastRace.prize + g.lastRace.cash ? `  +${money(g.lastRace.prize + g.lastRace.cash)}` : ''}`),
+        el('div', 'sub', `last: ${g.lastRace.finished ? `P${g.lastRace.position}` : 'DNF'} at ${g.lastRace.track}${g.lastRace.prize + g.lastRace.cash ? `  +${money(g.lastRace.prize + g.lastRace.cash)}` : ''}  +${g.lastRace.score} pts`),
       );
     }
     header.append(title, wallet);
@@ -254,18 +336,64 @@ export class Screens {
       tiles.append(tile);
     }
 
+    // Two spots held for later, so the tiles make a full 3 x 3 grid.
+    for (const soon of SOON) {
+      const tile = el('div', 'tile soon');
+      const art = el('div', 'art');
+      art.innerHTML = `<svg viewBox="0 0 64 64" width="72" height="72" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">${soon.icon}</svg>`;
+      tile.append(art, el('div', 'name', soon.title), el('div', 'blurb', soon.blurb), this.button('Coming soon', () => {}, { disabled: true }));
+      tiles.append(tile);
+    }
+
     const footer = el('div', 'shop-foot');
     const next = this.button(`Next race: ${o.nextTrack.name}`, o.onNextRace, { hint: `race ${g.racesDone + 1}  ·  you start P${o.gridPosition}` });
     next.classList.add('primary');
     footer.append(this.button('Main menu', o.onMenu, { sound: 'back' }), next);
 
-    page.append(header, tiles, footer);
+    // The left column: a window onto the spinning car (the 3D view behind the screen) and the paint palette.
+    const side = el('div', 'garage-side');
+    const window3d = el('div', 'car-window');
+    window3d.append(el('div', 'car-caption', `${o.carName}`));
+    const palette = el('div', 'palette');
+    const swatches = PALETTE.map((p) => {
+      const b = el('button', 'swatch' + (p.color === o.color ? ' selected' : ''));
+      b.style.background = `#${p.color.toString(16).padStart(6, '0')}`;
+      b.title = p.name;
+      b.setAttribute('aria-label', p.name);
+      b.addEventListener('mouseenter', () => this.onSound('hover'));
+      b.addEventListener('click', () => {
+        this.onSound('select');
+        swatches.forEach((x) => x.classList.toggle('selected', x === b));
+        o.onColor(p.color);
+      });
+      palette.append(b);
+      return b;
+    });
+    side.append(window3d, el('div', 'sub', 'Paint'), palette);
+
+    const body = el('div', 'shop-body');
+    body.append(tiles, side); // tiles first in the tab order; the side column is shown on the left
+    page.append(header, body, footer);
     const step = (n: number) => () => this.moveFocus(n);
-    this.open(page, o.onMenu, { ArrowLeft: step(-1), ArrowRight: step(1) });
+    this.open(page, o.onMenu, { ArrowLeft: step(-1), ArrowRight: step(1) }, true);
     // Land on the tile that was just bought from, or else on the first thing you can afford.
     (focusTarget ?? page.querySelector<HTMLButtonElement>('.tile button.primary:not(:disabled)') ?? next).focus();
   }
 }
+
+/** Tiles that are not for sale yet. */
+const SOON = [
+  {
+    title: 'Weapons',
+    blurb: 'Bigger magazines and harder-hitting missiles.',
+    icon: '<path d="M10 40l30-14 12 6-6 12z"/><path d="M40 26l8-10 4 10"/><path d="M16 38l-6 8 10-2"/>',
+  },
+  {
+    title: 'Ammo',
+    blurb: 'Start each race with more to shoot, drop and spill.',
+    icon: '<rect x="12" y="30" width="40" height="22" rx="3"/><path d="M20 30V18M32 30V14M44 30V18"/><circle cx="20" cy="16" r="3"/><circle cx="32" cy="12" r="3"/><circle cx="44" cy="16" r="3"/>',
+  },
+];
 
 /** Simple line drawings for the shop tiles (64x64, drawn with the current text colour). */
 const ICONS: Record<UpgradeSlot, string> = {

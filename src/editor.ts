@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import {
   detectCrossings,
   loadCustomTracks,
+  rightAnglePoints,
   sampleLoop,
   sanitizeTrack,
   saveCustomTracks,
@@ -91,6 +92,11 @@ function simplify(points: [number, number][], target: number): [number, number][
 
 const PRESETS: { label: string; make: () => Pick<Doc, 'points' | 'theme' | 'hills' | 'crossings' | 'laps'> }[] = [
   { label: 'Oval', make: () => ({ points: ovalPoints(), theme: 'grass', hills: 0.8, crossings: [], laps: 3 }) },
+  {
+    // Straights along two axes and nothing but 90 degree bends (all lefts and rights), the notches giving it variety.
+    label: 'Right angles only (all 90° turns)',
+    make: () => ({ points: rightAnglePoints(), theme: 'snow', hills: 0.5, crossings: [], laps: 3 }),
+  },
   {
     label: 'Figure eight (with a crossing)',
     make: () => ({ points: figureEightPoints(), theme: 'grass', hills: 0.8, crossings: [{ x: 0, z: 0, type: 'bridge', over: 'first' }], laps: 3 }),

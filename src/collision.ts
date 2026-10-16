@@ -128,8 +128,9 @@ function resolveContact(a: Car, b: Car | null, p: Vec, n: Vec, restitution: numb
   const impact = impactSpeed(a, b, -vn);
   if (impact > 0) {
     const hurt = impact * (!b ? WALL_DAMAGE : a.wrecked || b.wrecked ? WRECK_DAMAGE : CAR_DAMAGE);
-    a.damage(hurt);
-    b?.damage(hurt);
+    // Who hurt whom, for crediting wrecks (hitting a wreck, or a wall, is nobody's doing).
+    a.damage(hurt, b && !b.wrecked ? b : undefined);
+    b?.damage(hurt, a.wrecked ? undefined : a);
     contactListener?.(b ? 'car' : 'wall', p.x, p.z, impact);
   }
 

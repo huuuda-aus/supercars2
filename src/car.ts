@@ -27,6 +27,7 @@ const LAND_SKID_FULL = 20;
 const LAND_SKID_TIME = 0.4;
 /** How much of its speed into a ramp face a crashed car keeps, as a rebound. */
 const FACE_REBOUND = 0.3;
+const ATTACK_MEMORY = 8; // seconds a hit is remembered when crediting a wreck
 const WRECK_DECEL = 0.5; // 1/s, viscous part of how fast a destroyed car's leftover motion dies away
 const WRECK_FRICTION = 12; // m/s^2 of dry scraping: with the wreck mass this out-pulls a car's engine, so pushing slowly does nothing
 export const START_LOADOUT = { missiles: 5, mines: 5, nitro: 3, bullets: 100, rearMissiles: 3, oil: 3 };
@@ -218,6 +219,9 @@ export class Car {
   /** Held on the start line: the pedals work and the engine revs, but the car does not move. */
   held = false;
   private wasHeld = false;
+  lastAttacker: Car | null = null; // the car that last hurt this one (a weapon's owner, or whoever it collided with)
+  killedBy: Car | null = null; // set when it is wrecked: the attacker, if it was hit within the last few seconds
+  private attackTimer = 0;
   shieldTimer = 0; // while above zero the car takes no damage (pushes and blasts still move it)
   oilTimer = 0; // seconds of slippery tyres left; refreshed by the weapons system while a wheel is on a slick
   landSkid = 0; // seconds of tyre scrub left after touching down hard (read by the skidmarks)
@@ -294,6 +298,8 @@ export class Car {
     this.justWrecked = false;
     this.nitroTimer = 0;
     this.shieldTimer = 0;
+    this.lastAttacker = this.killedBy = null;
+    this.attackTimer = 0;
     this.roll = this.rollRate = 0;
     this.showWreck(false);
   }
@@ -374,12 +380,18 @@ export class Car {
 
   get nitroActive(): boolean { return this.nitroTimer > 0; }
 
-  damage(amount: number): void {
+  damage(amount: number, source?: Car): void {
     if (this.wrecked || this.shieldTimer > 0) return;
+    // Remember who hurt us, so that whoever finishes the job gets the credit for the wreck.
+    if (source && source !== this && !source.wrecked) {
+      this.lastAttacker = source;
+      this.attackTimer = ATTACK_MEMORY;
+    }
     this.health -= amount;
     if (this.health <= 0) {
       this.health = 0;
       this.wreckNow();
+      this.killedBy = this.attackTimer > 0 ? this.lastAttacker : null;
     }
   }
 
@@ -394,7 +406,7 @@ export class Car {
    * Explosion at (cx, cz): shoves the car away (the closer, the harder), kicks its tail loose so it spins,
    * can pop it into the air, and damages it. `falloff` is 1 at the centre and 0 at the edge of `radius`.
    */
-  applyBlast(cx: number, cz: number, radius: number, power: number, damage: number, lift: number): void {
+  applyBlast(cx: number, cz: number, radius: number, power: number, damage: number, lift: number, source?: Car): void {
     if (this.wrecked) return;
     const dx = this.x - cx;
     const dz = this.z - cz;
@@ -411,7 +423,7 @@ export class Car {
     this.breakaway = Math.max(this.breakaway, 1.0);
     if (lift > 0) this.vy += lift * falloff;
     this.lastImpact = Math.max(this.lastImpact, 1.5 + 4 * falloff);
-    this.damage(damage * (0.25 + 0.75 * falloff));
+    this.damage(damage * (0.25 + 0.75 * falloff), source);
   }
 
   get topSpeed(): number { return MAX_SPEED * this.stats.maxSpeed * (this.nitroTimer > 0 ? 1 + (NITRO_SPEED - 1) * this.stats.nitro : 1); }
@@ -458,6 +470,7 @@ export class Car {
     if (this.nitroTimer > 0) this.nitroTimer = Math.max(0, this.nitroTimer - dt);
     this.landSkid = Math.max(0, this.landSkid - dt);
     this.shieldTimer = Math.max(0, this.shieldTimer - dt);
+    this.attackTimer = Math.max(0, this.attackTimer - dt);
     this.oilTimer = Math.max(0, this.oilTimer - dt);
     if (this.wrecked) this.wreck.update(dt);
     const prevX = this.x;

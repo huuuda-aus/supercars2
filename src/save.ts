@@ -10,6 +10,7 @@ export interface LastRace {
   finished: boolean;
   prize: number;
   cash: number; // dollars picked up on the track in that race
+  score: number; // points for that race
 }
 
 /** Everything about a career in progress. */
@@ -17,8 +18,12 @@ export interface SaveGame {
   version: 1;
   name: string;
   carId: CarId;
+  /** Paint colour (0xRRGGBB). */
+  color: number;
   levels: UpgradeLevels;
   money: number;
+  /** Total score over the career (see score.ts). */
+  score: number;
   racesDone: number;
   lastRace: LastRace | null;
 }
@@ -48,7 +53,7 @@ export function cleanName(raw: unknown): string {
 }
 
 export function newGame(carId: CarId, name: string): SaveGame {
-  return { version: 1, name: cleanName(name), carId, levels: { ...STOCK_LEVELS }, money: 1000, racesDone: 0, lastRace: null };
+  return { version: 1, name: cleanName(name), carId, color: GARAGE.find((c) => c.id === carId)?.color ?? 0xd8352a, levels: { ...STOCK_LEVELS }, money: 1000, score: 0, racesDone: 0, lastRace: null };
 }
 
 // Storage can be missing or throw (private windows, blocked site data), so every access is guarded; the game plays on
@@ -84,12 +89,14 @@ export function loadGame(): SaveGame | null {
     version: 1,
     name: cleanName(raw.name),
     carId: raw.carId as CarId,
+    color: typeof raw.color === 'number' && Number.isInteger(raw.color) && raw.color >= 0 && raw.color <= 0xffffff ? raw.color : GARAGE.find((c) => c.id === raw.carId)?.color ?? 0xd8352a,
     levels,
     money: typeof raw.money === 'number' && Number.isFinite(raw.money) ? Math.max(0, Math.round(raw.money)) : 0,
+    score: typeof raw.score === 'number' && Number.isFinite(raw.score) ? Math.max(0, Math.round(raw.score)) : 0,
     racesDone: typeof raw.racesDone === 'number' && Number.isFinite(raw.racesDone) ? Math.max(0, Math.floor(raw.racesDone)) : 0,
     lastRace:
       last && typeof last.track === 'string' && typeof last.position === 'number'
-        ? { track: last.track, position: last.position, finished: !!last.finished, prize: Number(last.prize) || 0, cash: Number(last.cash) || 0 }
+        ? { track: last.track, position: last.position, finished: !!last.finished, prize: Number(last.prize) || 0, cash: Number(last.cash) || 0, score: Number(last.score) || 0 }
         : null,
   };
 }

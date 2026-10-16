@@ -277,7 +277,7 @@ export class Weapons {
       }
       if (hit) {
         this.removeMissile(i);
-        if (m.age <= MISSILE_LIFE) this.explode(m.x, m.z, m.y, MISSILE_BLAST, 1, m.index);
+        if (m.age <= MISSILE_LIFE) this.explode(m.x, m.z, m.y, MISSILE_BLAST, 1, m.index, m.owner);
       }
     }
 
@@ -293,7 +293,7 @@ export class Weapons {
       }
       if (hit) {
         this.removeMine(i);
-        this.explode(m.x, m.z, m.y + 0.3, MINE_BLAST, 1.25, m.index);
+        this.explode(m.x, m.z, m.y + 0.3, MINE_BLAST, 1.25, m.index, m.owner);
       } else if (m.age > MINE_LIFE) this.removeMine(i);
     }
 
@@ -355,7 +355,7 @@ export class Weapons {
           const fx = Math.sin(c.heading);
           const fz = Math.cos(c.heading);
           if (Math.abs(dx * fx + dz * fz) < HULL_HZ + 0.15 && Math.abs(dx * fz - dz * fx) < HULL_HX + 0.15) {
-            c.damage(GUN_DAMAGE);
+            c.damage(GUN_DAMAGE, b.owner);
             this.stats.bulletHits++;
             this.spark(px, b.y, pz, 0.5, 0.14);
             this.sound({ type: 'hit', x: px, z: pz, onCar: true });
@@ -425,11 +425,11 @@ export class Weapons {
     return new THREE.Vector3(-dhdx, 1, -dhdz).normalize();
   }
 
-  private explode(x: number, z: number, y: number, blast: typeof MISSILE_BLAST, size: number, index: number): void {
+  private explode(x: number, z: number, y: number, blast: typeof MISSILE_BLAST, size: number, index: number, owner?: Car): void {
     this.sound({ type: 'explosion', x, z, size: blast.radius * size });
     const ground = this.track.query(x, z, index);
     this.fx.spawn(x, Math.max(y, ground.height + 0.5), z, blast.radius * size, ground.height, this.groundNormal(x, z, ground.index));
-    if (blast.power > 0) for (const c of this.cars) c.applyBlast(x, z, blast.radius, blast.power, blast.damage, blast.lift);
+    if (blast.power > 0) for (const c of this.cars) c.applyBlast(x, z, blast.radius, blast.power, blast.damage, blast.lift, owner);
   }
 
   private removeMissile(i: number): void {

@@ -288,6 +288,41 @@ export function roundedLoop(input: Corner[]): [number, number][] {
   return out;
 }
 
+/**
+ * Like roundedLoop, but without the points in the middle of straights (the bends keep all theirs, so they stay exact
+ * quarter circles), which leaves fewer points to edit by hand in the track editor.
+ */
+export function compactRoundedLoop(corners: Corner[]): [number, number][] {
+  // Start the loop on its straightest stretch first (while the straights still have points in them): that point is kept.
+  const dense = startOnFlattest(roundedLoop(corners));
+  const n = dense.length;
+  const turn = (i: number) => {
+    const a = dense[(i + n - 1) % n];
+    const b = dense[i];
+    const c = dense[(i + 1) % n];
+    const d = Math.atan2(c[1] - b[1], c[0] - b[0]) - Math.atan2(b[1] - a[1], b[0] - a[0]);
+    return Math.abs(Math.atan2(Math.sin(d), Math.cos(d)));
+  };
+  // Drop the points in the middle of straights; keep every point on a bend and the ones either side of it.
+  const bendy = dense.map((_, i) => turn(i) > 0.02);
+  return dense.filter((_, i) => i === 0 || bendy[i] || bendy[(i + 1) % n] || bendy[(i + n - 1) % n]);
+}
+
+/**
+ * A circuit with no bend other than a quarter turn: every straight runs along one of two axes and every corner is a
+ * 90 degree arc, left or right. Sixteen corners (notches in the outline give it lefts and rights).
+ */
+const RIGHT_ANGLES: Corner[] = [
+  [-260, 160, 26], [260, 160, 26], [260, 40, 26], [120, 40, 26], [120, -40, 26], [260, -40, 26], [260, -160, 26], [60, -160, 26],
+  [60, -80, 26], [-60, -80, 26], [-60, -160, 26], [-260, -160, 26], [-260, -40, 26], [-120, -40, 26], [-120, 40, 26], [-260, 40, 26],
+];
+
+/** Control points for the right-angles circuit (offered as a starting shape in the track editor). */
+export function rightAnglePoints(): [number, number][] {
+  const scale = 0.6;
+  return compactRoundedLoop(RIGHT_ANGLES.map(([x, z, r]) => [x * scale, z * scale, Math.max(19, r * (0.5 + 0.5 * scale))] as Corner));
+}
+
 /** Shrink or grow a drawn circuit, keeping its bends as tight as drawn (but never under 19 m, which the road needs). */
 function layout(corners: Corner[], scale: number): [number, number][] {
   return startOnFlattest(roundedLoop(corners.map(([x, z, r]) => [x * scale, z * scale, Math.max(19, r * (0.5 + 0.5 * scale))] as Corner)));
