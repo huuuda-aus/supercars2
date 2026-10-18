@@ -105,6 +105,8 @@ const JUMP_ARROW_SPACING = 4.5; // from one chevron to the next
 const JUMP_ARROW_LENGTH = 2.6; // how far the tip is ahead of the arms
 const JUMP_ARROW_WIDTH = 6; // each arm reaches this far to the side of the middle: the chevron is twice this wide
 const JUMP_ARROW_THICKNESS = 0.9;
+const LIP_BEVEL = 0.32; // largest bevel on the edge of a jump's lip (m); it varies along the edge
+const LIP_STEP = 0.5; // spacing of the points along the lip the bevel is sampled at (m)
 const JUMP = { x: 0, z: 0, height: 8, length: 20, lipSlope: 1.7 };
 
 export class Track {
@@ -608,7 +610,7 @@ export class Track {
 
   /**
    * Solid ground around the road so raised sections read as ramps: a shoulder at road height out to
-   * the barriers, then a 45 degree embankment dropping to the ground. Both vanish where the road is flat.
+   * the barriers, then a sheer side dropping straight to the ground. Both vanish where the road is flat.
    */
   private buildTerrain(): THREE.Mesh {
     const n = this.sampleCount;
@@ -642,7 +644,7 @@ export class Track {
     for (const side of [1, -1]) {
       const h = (i: number) => this.samples[i].p.y;
       addStrip(side, (i) => [[this.halfWidth, h(i), grass], [outer, h(i), grass]]); // shoulder
-      addStrip(side, (i) => [[outer, h(i), dirt], [outer + Math.max(h(i), 0), groundY, grass]]); // embankment
+      addStrip(side, (i) => [[outer, h(i), dirt], [outer, groundY, dirt]]); // sheer side
     }
     const g = new THREE.BufferGeometry();
     g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
@@ -771,13 +773,16 @@ export class Track {
     return best;
   }
 
-  /** The two sheer faces of the ramps either side of the gap. The ground beneath is the other road and grass. */
+  /**
+   * The solid end faces of raised ground: the two sheer faces of the jump either side of the gap, and a closing face where
+   * the sides stop beside a flyover's ramps. The ground beneath is the other road and grass.
+   */
   private buildPit(): THREE.Mesh {
-    if (!this.hasJump) return new THREE.Mesh(new THREE.BufferGeometry(), new THREE.MeshBasicMaterial());
+    const n = this.sampleCount;
     const outer = this.wallOffset + this.wallThickness;
     const floor = this.pitFloor + 0.01;
-    const face = new THREE.Color(THEMES[this.def.theme].embankment).multiplyScalar(0.8); // the cut earth, a shade darker than the bank
-    const dirt = new THREE.Color(THEMES[this.def.theme].embankment);
+    const face = new THREE.Color(THEMES[this.def.theme].embankment).multiplyScalar(0.8); // the cut earth, a shade darker than the sides
+    const worn = new THREE.Color(THEMES[this.def.theme].embankment).multiplyScalar(1.15); // the chipped edge of a lip, a shade lighter than the sides
     const pos: number[] = [];
     const col: number[] = [];
     const idx: number[] = [];
@@ -789,18 +794,46 @@ export class Track {
       }
       idx.push(base, base + 1, base + 2, base, base + 2, base + 3);
     };
-    const at = (sample: number, lateral: number, y: number) => {
+    /** A point across the track at `sample`, `lateral` to the side, at height y and `along` the tangent. */
+    const at = (sample: number, lateral: number, y: number, along = 0) => {
       const { p, tangent } = this.samples[sample];
-      return [p.x - tangent.z * lateral, y, p.z + tangent.x * lateral];
+      return [p.x - tangent.z * lateral + tangent.x * along, y, p.z + tangent.x * lateral + tangent.z * along];
     };
-    for (const sample of [this.gapFrom, this.gapTo]) {
+    /**
+     * The whole cross-section of the ramp at a sample: a rectangle from the ground up to the road and shoulders (the
+     * sides drop straight down, so this closes the ramp completely). With `into` (+1 or -1:
+     * which way along the road the open side lies) the top edge is bevelled by a little, unevenly, like a chipped lip.
+     */
+    const crossSection = (sample: number, into: number, seed: number) => {
       const top = this.samples[sample].p.y;
-      // The cut face is the whole cross-section of the ramp: the road and shoulders, and the banks that slope down
-      // beside them (45 degrees, as wide as they are high). Closing the banks too stops the cut looking hollow.
-      const reach = outer + Math.max(top, 0);
-      quad([at(sample, -outer, floor), at(sample, outer, floor), at(sample, outer, top), at(sample, -outer, top)], face);
-      quad([at(sample, -reach, floor), at(sample, -outer, floor), at(sample, -outer, top), at(sample, -outer, top)], dirt);
-      quad([at(sample, outer, floor), at(sample, reach, floor), at(sample, outer, top), at(sample, outer, top)], dirt);
+      const steps = Math.ceil((2 * outer) / LIP_STEP);
+      const bevel = (l: number): number => {
+        if (!into) return 0;
+        const wobble = 0.5 * Math.sin(l * 2.3 + seed) + 0.3 * Math.sin(l * 5.1 + seed * 1.7) + 0.2 * Math.sin(l * 11.7 + seed * 2.9);
+        return Math.max(0, LIP_BEVEL * (0.55 + 0.45 * wobble)) * Math.min(1, (outer - Math.abs(l)) / 1.5); // tapers to nothing at the sides
+      };
+      const lipY = (l: number) => top + (Math.abs(l) <= this.halfWidth ? 0.02 : 0); // the road sheet lies 2 cm above its sample
+      for (let j = 0; j < steps; j++) {
+        const l0 = -outer + (2 * outer * j) / steps;
+        const l1 = -outer + (2 * outer * (j + 1)) / steps;
+        const b0 = bevel(l0);
+        const b1 = bevel(l1);
+        const t0 = at(sample, l0, lipY(l0));
+        const t1 = at(sample, l1, lipY(l1));
+        const c0 = at(sample, l0, lipY(l0) - b0, into * b0);
+        const c1 = at(sample, l1, lipY(l1) - b1, into * b1);
+        if (into) quad([t0, t1, c1, c0], worn);
+        quad([at(sample, l0, floor), at(sample, l1, floor), c1, c0], face);
+      }
+    };
+    if (this.hasJump) {
+      crossSection(this.gapFrom, 1, 0);
+      crossSection(this.gapTo, -1, 2.4);
+    }
+    // Where the sides stop beside a flyover's ramps (the road is too high above the ground), close the open end.
+    for (let i = 0; i < n; i++) {
+      if (this.terrainHole[i]) continue;
+      if (this.terrainHole[(i + 1) % n] || this.terrainHole[(i + n - 1) % n]) crossSection(i, 0, 0);
     }
     const g = new THREE.BufferGeometry();
     g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
