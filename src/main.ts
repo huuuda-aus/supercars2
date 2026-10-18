@@ -309,6 +309,7 @@ const placeEl = document.getElementById('place')!;
 const lapTimeEl = document.getElementById('laptime')!;
 const gauges = new Gauges();
 const audio = new GameAudio();
+race.onBeep = (long) => audio.playHorn(long);
 const popups = new Popups();
 const PICKUP_NAMES: Record<string, string> = { ammo: 'Ammo crate', nitro: 'Nitro', repair: 'Repair kit', gun: 'Gun ammo', rear: 'Rear missiles', oil: 'Oil slicks', shield: 'Shield', cash: 'Cash' };
 weapons.sound = (e) => audio.playEvent(e);

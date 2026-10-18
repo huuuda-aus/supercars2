@@ -10,10 +10,14 @@ export class Race {
   countdown = 0;
   time = 0;
   finishOrder: Car[] = [];
+  /** Called on each start-horn beat: short for 3, 2, 1, long for go. */
+  onBeep: (long: boolean) => void = () => {};
+  private lastBeat = 0;
 
   start(): void {
     this.state = 'countdown';
     this.countdown = 3;
+    this.lastBeat = 4;
     this.time = 0;
     this.finishOrder = [];
   }
@@ -32,9 +36,15 @@ export class Race {
   update(dt: number, cars: Car[]): void {
     if (this.state === 'countdown') {
       this.countdown -= dt;
+      const beat = Math.ceil(this.countdown);
+      if (beat >= 1 && beat < this.lastBeat) {
+        this.lastBeat = beat;
+        this.onBeep(false);
+      }
       if (this.countdown <= 0) {
         this.state = 'racing';
         this.time = 0;
+        this.onBeep(true);
       }
     } else if (this.state === 'racing') {
       this.time += dt;

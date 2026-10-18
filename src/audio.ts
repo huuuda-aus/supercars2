@@ -456,6 +456,33 @@ export class GameAudio {
     }
   }
 
+  /** The starting horn: three short C3 blasts for 3, 2, 1, then a longer C4 for go. */
+  playHorn(long: boolean): void {
+    const ctx = this.ctx;
+    if (!ctx || !this.master || this.muted) return;
+    const freq = long ? 261.63 : 130.81; // C4 / C3
+    const length = long ? 0.9 : 0.3;
+    const t = ctx.currentTime;
+    const gain = ctx.createGain();
+    gain.gain.setValueAtTime(0.0001, t);
+    gain.gain.exponentialRampToValueAtTime(0.55, t + 0.02);
+    gain.gain.setValueAtTime(0.55, t + length - 0.06);
+    gain.gain.exponentialRampToValueAtTime(0.0001, t + length);
+    const filter = ctx.createBiquadFilter(); // a horn is buzzy but not harsh; low notes need their harmonics to be heard
+    filter.type = 'lowpass';
+    filter.frequency.value = 1400;
+    filter.connect(gain).connect(this.master);
+    for (const detune of [-6, 6]) {
+      const osc = ctx.createOscillator();
+      osc.type = 'sawtooth';
+      osc.frequency.value = freq;
+      osc.detune.value = detune;
+      osc.connect(filter);
+      osc.start(t);
+      osc.stop(t + length + 0.02);
+    }
+  }
+
   /** A burst of filtered noise: the filter sweeps from `from` to `to` Hz over its length. */
   private noiseBurst(out: AudioNode, t: number, length: number, type: BiquadFilterType, from: number, to: number, peak: number, attack = 0.003): void {
     const ctx = this.ctx!;
