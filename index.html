@@ -11,10 +11,10 @@
     html, body { font-family: var(--font); font-synthesis: none; }
     html, body { margin: 0; height: 100%; overflow: hidden; background: #111; }
     canvas { display: block; }
-    #hpbar { position: fixed; top: 10px; left: 12px; width: 240px; height: 24px; box-sizing: border-box; background: rgba(10, 14, 12, 0.6); border: 1px solid rgba(255, 255, 255, 0.45); border-radius: 4px; overflow: hidden; pointer-events: none; }
+    #hpbar { position: fixed; top: 10px; left: 50%; transform: translateX(-50%); width: 720px; max-width: 60vw; height: 48px; box-sizing: border-box; background: rgba(10, 14, 12, 0.6); border: 3px solid #000; border-radius: 8px; overflow: hidden; pointer-events: none; }
     #hpfill { height: 100%; width: 100%; background: #3fcf5a; }
-    #hptext { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: #fff; font: 600 12px var(--font); text-shadow: 0 0 3px #000; }
-    #hud { position: fixed; top: calc(44px + clamp(40px, 7vh, 80px) * 2.5); left: 12px; color: #fff; font: 500 12px/1.5 var(--font); text-shadow: 0 0 3px #000; white-space: pre; pointer-events: none; }
+    #hptext { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: #fff; font: 700 24px var(--font); -webkit-text-stroke: 0.15em #000; paint-order: stroke fill; text-shadow: 0 0 3px #000; }
+    #hud { position: fixed; top: calc(14px + clamp(40px, 7vh, 80px) * 2.5); left: 12px; color: #fff; font: 500 12px/1.5 var(--font); text-shadow: 0 0 3px #000; white-space: pre; pointer-events: none; }
     #banner .result { display: flex; flex-direction: column; align-items: center; gap: 14px; white-space: normal; padding: 18px 26px; background: rgba(10, 14, 12, 0.72); border: 1px solid rgba(255, 255, 255, 0.2); }
     #banner h2 { margin: 0; font-size: 34px; letter-spacing: 0.1em; }
     #banner table { border-collapse: collapse; font-size: 17px; min-width: 360px; }
@@ -25,7 +25,7 @@
     #banner tr.total td { font-weight: 800; border-top: 1px solid rgba(255, 255, 255, 0.3); }
     #banner p { margin: 0; font-size: 16px; }
     #banner p.keys { font-size: 14px; color: #b9bfb2; }
-    #raceinfo { --big: clamp(40px, 7vh, 80px); position: fixed; top: 40px; left: 12px; text-align: left; color: #fff; font: 700 var(--big)/1.1 var(--font); -webkit-text-stroke: 0.12em #000; paint-order: stroke fill; text-shadow: 0 3px 0 #000; pointer-events: none; white-space: pre; }
+    #raceinfo { --big: clamp(40px, 7vh, 80px); position: fixed; top: 10px; left: 12px; text-align: left; color: #fff; font: 700 var(--big)/1.1 var(--font); -webkit-text-stroke: 0.12em #000; paint-order: stroke fill; text-shadow: 0 3px 0 #000; pointer-events: none; white-space: pre; }
     #raceinfo #laptime { font-size: 0.6em; }
     #banner { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; text-align: center; color: #fff; font: 600 24px/1.4 var(--font); text-shadow: 0 0 6px #000, 0 0 2px #000; white-space: pre; pointer-events: none; }
     #gauges { position: fixed; inset: 0; padding: 12px; box-sizing: border-box; display: flex; justify-content: space-between; align-items: flex-end; pointer-events: none; }
@@ -57,6 +57,9 @@
     h1.logo { margin: 0; font-size: clamp(40px, 9vw, 84px); letter-spacing: 0.12em; text-shadow: 0 0 18px rgba(240, 120, 40, 0.6), 0 3px 0 #000; }
     h2 { margin: 0 0 6px; font-size: 26px; font-weight: 700; letter-spacing: 0.06em; }
     .tagline { margin: 0 0 18px; color: #c9c3a8; font-size: 14px; letter-spacing: 0.12em; text-transform: uppercase; }
+    .donate { position: absolute; right: 16px; bottom: 16px; display: flex; flex-direction: column; align-items: center; gap: 6px; width: 120px; color: #fff; text-decoration: none; font-size: 12px; text-align: center; white-space: pre; text-shadow: 0 0 3px #000; }
+    .donate img { width: 100%; background: #fff; padding: 4px; box-sizing: border-box; }
+    .donate:hover { color: #f0b050; }
     .credit { margin: 22px 0 0; color: #77806f; font-size: 12px; }
     .note { margin: 4px 0; max-width: 520px; color: #b9bfb2; font-size: 13px; }
     .menu { display: flex; flex-direction: column; gap: 10px; width: min(420px, 90vw); }

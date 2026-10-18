@@ -216,6 +216,9 @@ function gridSlot(slot: number): { index: number; lane: number } {
 }
 
 function resetRace(): void {
+  paused = false;
+  shownBanner = '';
+  lastResultKey = '';
   snapCamera = true;
   smoke.clear();
   fire.clear();
@@ -315,13 +318,28 @@ const hpBar = document.getElementById('hpbar')!;
 const hpFill = document.getElementById('hpfill')!;
 const hpText = document.getElementById('hptext')!;
 
+/** Write text only when it changed: setting identical text still costs the browser work every frame. */
+const shownText = new WeakMap<Element, string>();
+function setText(el: Element, text: string): void {
+  if (shownText.get(el) === text) return;
+  shownText.set(el, text);
+  el.textContent = text;
+}
+
+let hpBarWidth = '';
+let hpFillWidth = '';
+let hpFillColor = '';
+
 function updateHealthBar(): void {
   const hp = Math.max(0, car.health);
   const fraction = hp / car.stats.maxHealth;
-  hpBar.style.width = `${Math.min(240, 120 + car.stats.maxHealth * 0.8)}px`; // a tougher car gets a longer bar
-  hpFill.style.width = `${fraction * 100}%`;
-  hpFill.style.background = fraction > 0.6 ? '#3fcf5a' : fraction > 0.3 ? '#e6c230' : '#e03a2a';
-  hpText.textContent = car.wrecked ? 'WRECKED' : `HP ${Math.ceil(hp)}`;
+  const barWidth = `${Math.min(720, (120 + car.stats.maxHealth * 0.8) * 3)}px`; // a tougher car gets a longer bar (CSS max-width keeps it on screen)
+  if (barWidth !== hpBarWidth) hpBar.style.width = hpBarWidth = barWidth;
+  const fillWidth = `${fraction * 100}%`;
+  if (fillWidth !== hpFillWidth) hpFill.style.width = hpFillWidth = fillWidth;
+  const fillColor = fraction > 0.6 ? '#3fcf5a' : fraction > 0.3 ? '#e6c230' : '#e03a2a';
+  if (fillColor !== hpFillColor) hpFill.style.background = hpFillColor = fillColor;
+  setText(hpText, car.wrecked ? 'WRECKED' : `HP ${Math.ceil(hp)}`);
 }
 
 // --- Screens and game flow -------------------------------------------------------------------------------------
@@ -408,6 +426,7 @@ function setPlayerCar(id: CarId, color?: number): void {
 function enterMenu(show: () => void): void {
   mode = 'menu';
   previewing = false;
+  backdropRacing = false;
   race.toMenu();
   setRaceUi(false);
   popups.clear();
@@ -482,6 +501,43 @@ function showTitle(): void {
       onSettings: showSettings,
     }),
   );
+  startBackdropRace();
+}
+
+/** The title screen's backdrop: a random circuit with all eight cars (the player's too) driven by the AI. */
+let backdropRacing = false;
+let backdropWreckedFor = 0;
+let backdropTrackId = ''; // the circuit the last backdrop race picked
+function startBackdropRace(newTrack = false): void {
+  // Coming back from Settings etc. keeps the backdrop circuit: rebuilding a track is a visible hitch.
+  if (newTrack || currentTrackId !== backdropTrackId) {
+    const list = allTracks();
+    const others = list.filter((t) => t.id !== currentTrackId);
+    const pool = others.length > 0 ? others : list;
+    loadTrack(pool[Math.floor(Math.random() * pool.length)]);
+    backdropTrackId = currentTrackId;
+  }
+  levelIndex = loadSettings().difficulty;
+  resetRace();
+  car.stats = aiStats(RIVAL_CAR_TIER);
+  const slot = gridSlot(playerGridSlot);
+  backdropPlayerAi = new AiDriver(car, track, slot.lane, LEVELS[levelIndex], () => allCars, () => weapons.hazards, () => pickups.spots);
+  backdropRacing = true;
+  backdropWreckedFor = 0;
+}
+let backdropPlayerAi: AiDriver | null = null;
+
+/** One physics step of the backdrop race (no weapons, no lap limit). */
+function stepBackdrop(): void {
+  beginCollisionStep();
+  backdropPlayerAi?.update(STEP, true);
+  if (backdropPlayerAi) car.step(STEP, backdropPlayerAi, track);
+  for (const r of rivals) {
+    r.ai.update(STEP, true);
+    r.car.step(STEP, r.ai, track);
+  }
+  for (let i = 0; i < allCars.length; i++)
+    for (let j = i + 1; j < allCars.length; j++) collideCars(allCars[i], allCars[j]);
 }
 
 function showNameEntry(): void {
@@ -585,7 +641,7 @@ function showShop(game: SaveGame, focus?: UpgradeSlot): void {
 }
 
 /** Menu frames: no simulation, just a slowly circling view of the track (or the turntable in the car chooser). */
-function renderMenu(now: number): void {
+function renderMenu(now: number, dt: number): void {
   if (previewing && previewModel) {
     previewModel.rotation.y = now / (previewSide === 'left' ? 4200 : 1700); // the garage car turns slowly
     previewCam.aspect = innerWidth / innerHeight;
@@ -599,17 +655,19 @@ function renderMenu(now: number): void {
     renderer.render(previewScene, previewCam);
     return;
   }
-  const a = now / 14000;
+  const a = backdropRacing ? 0.8 : now / 14000; // the title's race is shot from one fixed angle
   const { centre, extent } = track;
   sun.target.position.set(centre.x, 0, centre.y);
   sun.position.copy(sun.target.position).add(SUN_OFFSET);
   chase.position.set(centre.x + Math.cos(a) * extent * 1.1, extent * 0.6, centre.y + Math.sin(a) * extent * 1.1);
   chase.lookAt(centre.x, 0, centre.y);
-  sky.update(1 / 60, chase.position);
+  sky.update(dt, chase.position);
   renderer.render(scene, chase);
 }
 
+const MAX_STEPS = 5; // physics steps per frame; beyond this a slow frame drops time instead of spiralling
 let acc = 0;
+let backdropAcc = 0;
 let last = performance.now();
 
 const IDLE: Controls = { throttle: 0, brake: 0, steer: 0, handbrake: 0 };
@@ -630,25 +688,30 @@ function controlsFor(c: Car, live: Controls, rev = 0): Controls {
   return c.finished ? coast(c) : live;
 }
 
-/** Keys that only matter during a race. */
-function raceKeys(): void {
+/** Keys that only matter during a race. Returns true when a key left the race screen. */
+function raceKeys(): boolean {
   if (input.tapped('Escape')) {
-    quitRace();
-    return;
+    if (car.finished || car.wrecked) {
+      quitRace();
+      return true;
+    }
+    paused = true;
+    return false;
   }
   if (input.tapped('Enter') && (car.finished || car.wrecked)) {
     finishRace();
-    return;
+    return true;
   }
   if (input.tapped('KeyR')) {
     resetRace();
     race.start();
   }
+  return false;
 }
 
 /** The score for the race as it stands (final once you have finished or been wrecked). */
 function currentScore(): ScoreBreakdown {
-  const position = race.standings(allCars, track).indexOf(car) + 1;
+  const position = standingsNow.indexOf(car) + 1;
   const destroyed = rivals.filter((r) => r.car.wrecked && r.car.killedBy === car).length;
   return scoreRace(position, allCars.length, destroyed, raceLapRecords, bestLapThisRace, car.driftScore + (car.wrecked ? 0 : car.driftCombo), car.airSeconds);
 }
@@ -663,8 +726,9 @@ const escapeHtml = (text: string): string => text.replace(/[&<>"']/g, (c) => `&#
 /** After-race screen as HTML tables (standings, then score), or null while the race is still on. */
 function resultHtml(): string | null {
   if (race.state === 'countdown' || !(car.finished || car.wrecked)) return null;
-  const standings = race.standings(allCars, track);
-  const rows = standings
+  const key = resultKey();
+  if (key === lastResultKey) return lastResultHtml;
+  const rows = standingsNow
     .map((c, i) => {
       const t = c.finished ? formatTime(c.finishTime) : c.wrecked ? 'wrecked' : 'racing…';
       const prize = careerGame ? `<td class="num">$${prizeFor(i + 1)}</td>` : '';
@@ -682,25 +746,100 @@ function resultHtml(): string | null {
   const pointRows = points.map(([label, detail, value]) => `<tr><td>${label}</td><td class="num">${detail}</td><td class="num">+${value}</td></tr>`).join('');
   const best = sc.bestLap !== null ? `<tr><td>Best lap</td><td class="num">${formatTime(sc.bestLap)}</td><td></td></tr>` : '';
   const head = careerGame ? '<th>#</th><th>Driver</th><th>Time</th><th>Prize</th>' : '<th>#</th><th>Driver</th><th>Time</th>';
-  return `<div class="result"><h2>${car.wrecked ? 'WRECKED' : 'FINISHED'}</h2>
+  lastResultKey = key;
+  return (lastResultHtml = `<div class="result"><h2>${car.wrecked ? 'WRECKED' : 'FINISHED'}</h2>
 <table><thead><tr>${head}</tr></thead><tbody>${rows}</tbody></table>
 <table><thead><tr><th>Score</th><th></th><th>Points</th></tr></thead><tbody>${pointRows}${best}<tr class="total"><td>Total</td><td></td><td class="num">${sc.total}</td></tr></tbody></table>
-<p>${careerGame ? `Cash picked up: $${raceCash}` : 'Training: not saved'}</p><p class="keys">Enter: continue · R: restart · Esc: quit</p></div>`;
+<p>${careerGame ? `Cash picked up: $${raceCash}` : 'Training: not saved'}</p><p class="keys">Enter: continue · R: restart · Esc: quit</p></div>`);
 }
 
+let paused = false;
+let shownBanner = ''; // what the banner currently shows, so identical content is not written again
+
+/** Set the banner from text or HTML; identical content is skipped. */
+function setBanner(content: string, html: boolean): void {
+  const key = (html ? 'h' : 't') + content;
+  if (key === shownBanner) return;
+  shownBanner = key;
+  if (html) banner.innerHTML = content;
+  else banner.textContent = content;
+}
+
+const PAUSE_HTML = '<div class="result"><h2>PAUSED</h2><p class="keys">Esc or Enter: resume · R: restart · Q: quit</p></div>';
+
+/** Pause when the tab or window loses focus during a live race. */
+function autoPause(): void {
+  if (mode === 'race' && race.state !== 'menu' && !(car.finished || car.wrecked)) paused = true;
+}
+addEventListener('blur', autoPause);
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) autoPause();
+});
+
+let lastResultKey = '';
 let lastResultHtml = '';
+const rivalCars: Car[] = [];
+const above = new THREE.Vector3();
+type MapMarker = { x: number; z: number; color: string; size: number };
+const markerPool: MapMarker[] = [];
+const markers: MapMarker[] = [];
+
+function addMarker(x: number, z: number, color: string, size: number): void {
+  const m = markerPool[markers.length] ?? (markerPool[markers.length] = { x: 0, z: 0, color: '', size: 0 });
+  m.x = x;
+  m.z = z;
+  m.color = color;
+  m.size = size;
+  markers.push(m);
+}
+
+/** Everything the result tables show, as a string: the HTML is rebuilt only when this changes. */
+function resultKey(): string {
+  let key = `${car.wrecked}|${raceCash}|${raceLapRecords}|${bestLapThisRace}|${Math.round(car.driftScore + car.driftCombo)}|${car.airSeconds.toFixed(1)}`;
+  for (const c of standingsNow) key += `|${c.name}:${c.finished ? c.finishTime : c.wrecked ? 'w' : ''}`;
+  return key;
+}
+let standingsNow: Car[] = []; // race.standings, sorted once per frame after the physics steps
 
 function frame(now: number): void {
+  requestAnimationFrame(frame); // scheduled first so an exception below cannot stop the loop
   if (mode === 'menu') {
+    const dt = Math.min((now - last) / 1000, 0.1);
     last = now;
     acc = 0;
     input.clear();
     audio.update(false, car, []);
-    renderMenu(now);
-    requestAnimationFrame(frame);
+    if (backdropRacing && !previewing) {
+      backdropAcc += dt;
+      while (backdropAcc >= STEP) {
+        stepBackdrop();
+        backdropAcc -= STEP;
+      }
+      // A crash ends the show: start the field over once a wreck has sat for a few seconds.
+      backdropWreckedFor = allCars.some((c) => c.wrecked) ? backdropWreckedFor + dt : 0;
+      if (backdropWreckedFor > 3) startBackdropRace(true);
+    }
+    renderMenu(now, dt);
     return;
   }
   const frameTime = Math.min((now - last) / 1000, 0.1);
+  if (paused) {
+    last = now;
+    acc = 0;
+    if (input.tapped('Escape') || input.tapped('Enter')) paused = false;
+    else if (input.tapped('KeyR')) {
+      resetRace();
+      race.start();
+    } else if (input.tapped('KeyQ')) {
+      quitRace();
+      return;
+    }
+    input.clear();
+    audio.update(false, car, rivalCars);
+    renderer.render(scene, useOrtho ? ortho : chase);
+    setBanner(paused ? PAUSE_HTML : '', true);
+    return;
+  }
   acc += frameTime;
   pickupMsgTime = Math.max(0, pickupMsgTime - frameTime);
   last = now;
@@ -711,7 +850,10 @@ function frame(now: number): void {
   const wantRear = input.tapped('KeyB');
   const wantOil = input.tapped('KeyO');
   // Read all three so none of them is left pending by the short-circuit.
-  const wantNitro = [input.tapped('ShiftLeft'), input.tapped('ShiftRight'), input.tapped('KeyN')].some(Boolean);
+  const nitroL = input.tapped('ShiftLeft');
+  const nitroR = input.tapped('ShiftRight');
+  const nitroN = input.tapped('KeyN');
+  const wantNitro = nitroL || nitroR || nitroN;
   if (race.state === 'racing' && !car.finished) {
     if (wantMissile) weapons.fireMissile(car);
     if (wantRear) weapons.fireMissile(car, true);
@@ -719,10 +861,9 @@ function frame(now: number): void {
     if (wantOil) weapons.dropOil(car);
     if (wantNitro) car.useNitro();
   }
-  while (acc >= STEP) {
+  for (let steps = 0; acc >= STEP && steps < MAX_STEPS; steps++) {
     beginCollisionStep();
     for (const c of allCars) c.held = race.state === 'countdown';
-    weapons.locked = !weaponsEnabled || race.weaponsLockedFor > 0;
     if (race.state === 'racing' && !car.finished && input.held('KeyF')) weapons.fireGun(car);
     race.update(STEP, allCars);
     car.step(STEP, controlsFor(car, input), track);
@@ -755,15 +896,17 @@ function frame(now: number): void {
     pickups.update(STEP, race.state === 'racing' ? allCars : []); // crates only spin in the menu
     acc -= STEP;
   }
+  acc %= STEP;
+  standingsNow = race.standings(allCars, track);
   if (input.tapped('KeyC')) useOrtho = !useOrtho;
-  raceKeys();
+  if (raceKeys()) return; // the race was left: skip the rest of this frame
 
-  minimap.draw(allCars, car, [
-    ...weapons.missiles.map((m) => ({ x: m.x, z: m.z, color: '#ffb030', size: 2.2 })),
-    ...pickups.spots.filter((p) => p.active).map((p) => ({ x: p.x, z: p.z, color: PICKUP_COLOURS[p.kind], size: 2.4 })),
-    ...weapons.oils.map((o) => ({ x: o.x, z: o.z, color: '#9a7bd0', size: 3 })),
-    ...weapons.mines.map((m) => ({ x: m.x, z: m.z, color: '#ff3020', size: 2.6 })),
-  ]);
+  markers.length = 0;
+  for (const m of weapons.missiles) addMarker(m.x, m.z, '#ffb030', 2.2);
+  for (const p of pickups.spots) if (p.active) addMarker(p.x, p.z, PICKUP_COLOURS[p.kind], 2.4);
+  for (const o of weapons.oils) addMarker(o.x, o.z, '#9a7bd0', 3);
+  for (const m of weapons.mines) addMarker(m.x, m.z, '#ff3020', 2.6);
+  minimap.draw(allCars, car, markers);
   updateCamera(frameTime);
   for (const c of allCars) {
     smoke.emit(c, frameTime);
@@ -773,31 +916,33 @@ function frame(now: number): void {
   fire.update(frameTime);
   sky.update(frameTime, (useOrtho ? ortho : chase).position);
   renderer.render(scene, useOrtho ? ortho : chase);
-  const place = race.standings(allCars, track).indexOf(car) + 1;
+  const place = standingsNow.indexOf(car) + 1;
   const lap = Math.max(1, Math.min(car.lap, race.totalLaps));
-  placeEl.textContent = `${place}/${allCars.length}`;
+  setText(placeEl, `${place}/${allCars.length}`);
   const pad2 = (n: number) => String(n).padStart(2, '0');
-  lapTimeEl.textContent = `lap ${pad2(lap)}/${pad2(race.totalLaps)}\n${formatTime(race.time)}`;
-  hud.textContent =
+  setText(lapTimeEl, `lap ${pad2(lap)}/${pad2(race.totalLaps)}\n${formatTime(race.time)}`);
+  setText(
+    hud,
     `height ${car.y.toFixed(1)}${car.airborne ? '  AIR' : ''}${car.drifting ? `  DRIFT ${Math.round(car.driftCombo)}` : ''}${car.offroad ? '  OFFROAD' : ''}${car.nitroActive ? '  NITRO' : ''}${car.shieldTimer > 0 ? `  SHIELD ${Math.ceil(car.shieldTimer)}s` : ''}${weaponsEnabled && race.state === 'racing' && race.weaponsLockedFor > 0 ? `  WEAPONS LOCKED ${Math.ceil(race.weaponsLockedFor)}s` : ''}\n` +
     `${weaponsEnabled ? `[Z] missile ${car.ammo.missiles} · [B] rear ${car.ammo.rearMissiles} · [F] gun ${car.ammo.bullets} · [X] mine ${car.ammo.mines} · [O] oil ${car.ammo.oil} · ` : 'weapons off · '}[Shift] nitro ${car.ammo.nitro}\n` +
     `drift pts ${Math.round(car.driftScore)}${pickupMsgTime > 0 ? `   ${pickupMsg}` : ''}\n` +
-    `arrows/WASD drive · Space handbrake · C camera · M mute · R restart · ${LEVELS[levelIndex].name} AI`;
+    `arrows/WASD drive · Space handbrake · C camera · M mute · R restart · ${LEVELS[levelIndex].name} AI`,
+  );
   // Tooltips float above the car, wherever the camera has it on screen.
   const view = useOrtho ? ortho : chase;
-  const above = new THREE.Vector3(car.x, car.y + 1, car.z).project(view);
+  above.set(car.x, car.y + 1, car.z).project(view);
   popups.update(frameTime, (above.x * 0.5 + 0.5) * innerWidth, (-above.y * 0.5 + 0.5) * innerHeight);
   updateHealthBar();
-  audio.update(race.state === 'racing' || race.state === 'countdown', car, rivals.map((r) => r.car));
+  rivalCars.length = rivals.length;
+  for (let i = 0; i < rivals.length; i++) rivalCars[i] = rivals[i].car;
+  audio.update(race.state === 'racing' || race.state === 'countdown', car, rivalCars);
   gauges.update(car.rpm, car.gear, car.speed * 3.6);
   const result = resultHtml();
   if (result !== null) {
-    if (result !== lastResultHtml) banner.innerHTML = lastResultHtml = result;
+    setBanner(result, true);
   } else {
-    lastResultHtml = '';
-    banner.textContent = bannerText();
+    setBanner(bannerText(), false);
   }
-  requestAnimationFrame(frame);
 }
 loadTrack(TRACK_LIST[0]);
 showTitle();

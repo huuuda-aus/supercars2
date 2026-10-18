@@ -1,5 +1,6 @@
 import type { UiSound } from './audio';
 import titleImage from './assets/title.png';
+import donateQr from './assets/donate-qr.svg';
 import { GARAGE, PALETTE, type CarId } from './garage';
 import { MAX_NAME_LENGTH, type SaveGame } from './save';
 import { loadRecords } from './records';
@@ -63,6 +64,8 @@ const money = (n: number) => `$${n.toLocaleString('en-US')}`;
  * between the buttons, Enter presses one, Escape goes back where a screen has a back action, Left/Right where a
  * screen uses them (the car chooser).
  */
+const DONATE_URL = 'https://ko-fi.com/huuuda';
+
 export class Screens {
   private readonly root: HTMLElement;
   private keys: Record<string, Handler> = {};
@@ -152,6 +155,15 @@ export class Screens {
       this.button('Settings', o.onSettings),
     );
     page.append(menu, el('p', 'credit', 'Font: Orbitron (SIL Open Font License)'));
+    const donate = el('a', 'donate');
+    donate.href = DONATE_URL;
+    donate.target = '_blank';
+    donate.rel = 'noopener';
+    const qr = el('img');
+    qr.src = donateQr;
+    qr.alt = 'QR code for ko-fi.com/huuuda';
+    donate.append(qr, el('span', '', 'Enjoying the game?\nSupport it on Ko-fi'));
+    page.append(donate);
     this.open(page);
   }
 
